@@ -10,7 +10,7 @@ English | [简体中文](README_zh-CN.md)
 
 > Generate question banks directly from textbooks.
 
-Leverage OpenRouter's multimodal/text models and local OCR capabilities to extract math problems and solutions from images, web pages, or PDFs, and generate uniformly formatted TeX question banks. Each question generates an independent TeX file, summarized by `master.tex` for batch compilation.
+Leverage OpenRouter's multimodal/language models and local OCR capabilities to extract math problems and solutions from images, web pages, or PDFs, and generate uniformly formatted TeX question banks. Each question generates an independent TeX file, summarized by `master.tex` for batch compilation.
 
 ## Background
 
