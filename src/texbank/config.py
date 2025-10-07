@@ -62,6 +62,9 @@ class PipelineConfig:
     minimal_answer_tokens: int = int(os.getenv('TEXBANK_MIN_ANSWER_TOKENS', '20'))
     llm_timeout: int = int(os.getenv('TEXBANK_LLM_TIMEOUT', '210'))
     default_language: str = os.getenv('TEXBANK_DEFAULT_LANGUAGE', 'auto')
+    concurrency_limit: int = int(os.getenv('TEXBANK_CONCURRENCY', '4'))
+    text_legibility_threshold: float = float(os.getenv('TEXBANK_TEXT_LEGIBILITY_THRESHOLD', '0.35'))
+    window_span_pages: int = int(os.getenv('TEXBANK_WINDOW_SPAN_PAGES', '2'))
 
 
 def get_pipeline_config() -> PipelineConfig:

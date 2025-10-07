@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup  # type: ignore[import]
 
 from .config import PipelineConfig, get_pipeline_config
 from .llm_client import OpenRouterClient
@@ -37,6 +40,10 @@ class Pipeline:
         if lang not in {'auto', 'zh', 'en'}:
             lang = 'auto'
         self.language = lang
+        self.concurrency = max(1, self.config.concurrency_limit)
+        self._out_dir: Optional[Path] = None
+        self._rendered_rel_paths: List[str] = []
+        self._render_lock = threading.Lock()
 
     # region image ---------------------------------------------------------------------------------
     def process_image(self, image_path: str, ask_llm_for_solution: bool = True) -> ProblemItem:
@@ -52,29 +59,43 @@ class Pipeline:
     # endregion ------------------------------------------------------------------------------------
 
     # region pdf -----------------------------------------------------------------------------------
-    def process_pdf(self, pdf_path: str, keywords: Optional[List[str]] = None) -> List[ProblemItem]:
+    def process_pdf(self, pdf_path: str, keywords: Optional[List[str]] = None, *, on_item: Optional[Callable[[ProblemItem], None]] = None) -> List[ProblemItem]:
         logger.info("Processing PDF: %s", pdf_path)
         keywords = keywords or self._default_pdf_keywords()
         if is_text_pdf(pdf_path):
             logger.info("Detected text-mode PDF, extracting spans (max preview %d pages)", self.config.max_pdf_preview_pages)
             page_text = extract_text_pages(pdf_path, limit=self.config.max_pdf_preview_pages)
+            legibility = self._compute_page_legibility(page_text)
+            if legibility:
+                avg_legibility = sum(legibility.values()) / max(1, len(legibility))
+            else:
+                avg_legibility = 0.0
             spans = extract_keyword_spans(page_text, keywords)
             logger.info("Found %d candidate spans in %s", len(spans), pdf_path)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Keyword list: %s", ', '.join(keywords))
-            if not spans and page_text:
-                combined = '\n\n'.join(page_text[p] for p in sorted(page_text.keys()))
+            force_windows = False
+            if avg_legibility < self.config.text_legibility_threshold:
+                logger.info(
+                    "Average legibility %.2f below threshold %.2f; falling back to windowed image extraction",
+                    avg_legibility,
+                    self.config.text_legibility_threshold,
+                )
+                force_windows = True
+            if not spans:
+                logger.info("No keyword spans detected; will approximate using page windows")
+                force_windows = True
+            if force_windows and page_text:
                 page_numbers = sorted(page_text.keys())
+                spans = self._build_window_spans(page_numbers)
+            if not spans and page_text:
+                page_numbers = sorted(page_text.keys())
+                combined = '\n\n'.join(page_text[p] for p in page_numbers)
                 spans = [TextSpan(start_page=page_numbers[0], end_page=page_numbers[-1], body=combined)]
-                logger.info("No keyword spans detected; using full-document span covering pages %s-%s", page_numbers[0], page_numbers[-1])
-            try:
-                items = self._process_text_pdf_via_images(pdf_path, spans)
-            except Exception as exc:
-                logger.warning("Multimodal extraction failed for %s, will fall back to text processing. Reason: %s", pdf_path, exc)
-                items = []
+            items = self._process_text_pdf_via_images(pdf_path, spans, on_item=on_item)
             if not items:
                 logger.info("Falling back to text parsing for %s", pdf_path)
-                items = self._process_text_pdf_via_text(pdf_path, spans)
+                items = self._process_text_pdf_via_text(pdf_path, spans, on_item=on_item)
             return items
 
         # scanning fallback
@@ -91,6 +112,8 @@ class Pipeline:
             item.metadata.update({'source_pdf': pdf_path, 'page': str(candidate_pages[idx] if idx < len(candidate_pages) else '?')})
             self._ensure_language(item)
             items.append(item)
+            if on_item:
+                on_item(item)
         return items
 
     # endregion ------------------------------------------------------------------------------------
@@ -186,17 +209,38 @@ class Pipeline:
     # endregion ------------------------------------------------------------------------------------
 
     # region rendering -----------------------------------------------------------------------------
+    def _reset_render_state(self, out_dir: Path) -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._out_dir = out_dir
+        self._rendered_rel_paths = []
+
+    def _write_master(self) -> str:
+        if self._out_dir is None:
+            raise ValueError('Output directory has not been initialised')
+        master_path = self._out_dir / 'master.tex'
+        render_master(self._rendered_rel_paths, str(master_path))
+        return str(master_path)
+
+    def _render_problem(self, item: ProblemItem) -> str:
+        if self._out_dir is None:
+            raise ValueError('Output directory has not been initialised')
+        path = self._out_dir / f"{item.identifier}.tex"
+        with self._render_lock:
+            render_single_tex(item, str(path))
+            rel_name = path.name
+            if rel_name not in self._rendered_rel_paths:
+                self._rendered_rel_paths.append(rel_name)
+            self._write_master()
+        return str(path)
+
     def render_items(self, items: Iterable[ProblemItem], out_dir: str) -> List[str]:
         out_dir_path = Path(out_dir)
-        out_dir_path.mkdir(parents=True, exist_ok=True)
+        self._reset_render_state(out_dir_path)
         paths: List[str] = []
         for item in items:
-            path = out_dir_path / f"{item.identifier}.tex"
-            render_single_tex(item, str(path))
-            paths.append(str(path))
-        master_path = out_dir_path / 'master.tex'
-        render_master([Path(p).name for p in paths], str(master_path))
-        paths.append(str(master_path))
+            paths.append(self._render_problem(item))
+        master_path = self._write_master()
+        paths.append(master_path)
         return paths
 
     # endregion ------------------------------------------------------------------------------------
@@ -254,94 +298,122 @@ class Pipeline:
             solution=normalized.get('solution'),
         )
 
-    def _process_text_pdf_via_images(self, pdf_path: str, spans: List[TextSpan]) -> List[ProblemItem]:
+    def _process_text_pdf_via_images(self, pdf_path: str, spans: List[TextSpan], *, on_item: Optional[Callable[[ProblemItem], None]] = None) -> List[ProblemItem]:
         if not spans:
             return []
+
+        def worker(span_index: int, span: TextSpan) -> Tuple[int, ProblemItem]:
+            try:
+                item = self._extract_span_via_images(pdf_path, span, span_index)
+            except Exception as exc:  # pragma: no cover - logging path
+                logger.warning(
+                    "Span #%d in %s fell back to text extraction due to error: %s",
+                    span_index + 1,
+                    pdf_path,
+                    exc,
+                )
+                item = self._extract_span_via_text(pdf_path, span, span_index)
+            if on_item:
+                on_item(item)
+            return span_index, item
+
+        if self.concurrency > 1 and len(spans) > 1:
+            logger.debug("Processing %d spans concurrently (max_workers=%d)", len(spans), self.concurrency)
+            with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+                futures = [executor.submit(worker, idx, span) for idx, span in enumerate(spans)]
+                results = [future.result() for future in futures]
+        else:
+            results = [worker(idx, span) for idx, span in enumerate(spans)]
+
+        results.sort(key=lambda pair: pair[0])
+        return [item for _, item in results]
+
+    def _process_text_pdf_via_text(self, pdf_path: str, spans: List[TextSpan], *, on_item: Optional[Callable[[ProblemItem], None]] = None) -> List[ProblemItem]:
         items: List[ProblemItem] = []
         for idx, span in enumerate(spans):
-            page_groups = self._select_page_groups(span)
-            if not page_groups:
-                raise ValueError('No page groups available for span')
-            identifier = f"{Path(pdf_path).stem}_q{idx+1}"
-            aggregate: Optional[ProblemItem] = None
-            applied_groups: List[List[int]] = []
-            hint = self._make_question_hint(span.body)
-            logger.info(
-                "Processing span #%d for %s (pages %s-%s) with %d candidate group(s)",
-                idx + 1,
-                pdf_path,
-                span.start_page,
-                span.end_page,
-                len(page_groups),
-            )
-            if hint and logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Span #%d hint: %s", idx + 1, hint)
-            for group in page_groups:
-                logger.info("Span #%d trying page group: %s", idx + 1, group)
-                image_paths = self._render_pdf_page_group(pdf_path, group)
-                if not image_paths:
-                    logger.warning("Failed to render pages %s for %s; skipping group", group, pdf_path)
-                    continue
-                partial = self._extract_problem_from_images(image_paths, identifier=identifier, hint=hint)
-                if not partial.exercise and not partial.answer and not partial.solution:
-                    logger.info("Group %s produced empty result, continuing", group)
-                    continue
-                if aggregate is None:
-                    aggregate = partial
-                else:
-                    self._merge_problem_items(aggregate, partial)
-                applied_groups.append(group)
-                if aggregate.exercise and (aggregate.solution or aggregate.answer):
-                    logger.info("Span #%d satisfied with current aggregation; stopping group attempts", idx + 1)
-                    break
-            if aggregate is None or not aggregate.exercise.strip():
-                logger.warning("Span #%d failed to extract via multimodal path", idx + 1)
-                raise ValueError('Failed to extract problem via multimodal pipeline')
-            if self.enable_llm_solution and self._needs_llm_solution(aggregate):
-                logger.info("Generating LLM solution for span #%d (%s)", idx + 1, identifier)
-                aggregate.llm_solution = self._generate_solution(aggregate.exercise)
-            aggregate.metadata.update({
-                'source': pdf_path,
-                'type': 'pdf-image',
-                'page_start': str(span.start_page),
-                'page_end': str(span.end_page),
-                'extraction_mode': 'multimodal',
-            })
-            if applied_groups:
-                aggregate.metadata['image_groups'] = ';'.join(' '.join(str(p) for p in grp) for grp in applied_groups)
-            if hint:
-                aggregate.metadata['question_hint'] = hint[:200]
-            self._ensure_language(aggregate)
-            items.append(aggregate)
+            item = self._extract_span_via_text(pdf_path, span, idx)
+            items.append(item)
+            if on_item:
+                on_item(item)
         return items
 
-    def _process_text_pdf_via_text(self, pdf_path: str, spans: List[TextSpan]) -> List[ProblemItem]:
-        items: List[ProblemItem] = []
-        for idx, span in enumerate(spans):
-            identifier = f"{Path(pdf_path).stem}_q{idx+1}"
-            logger.info(
-                "Text fallback span #%d for %s (pages %s-%s)",
-                idx + 1,
-                pdf_path,
-                span.start_page,
-                span.end_page,
-            )
-            exercise = span.body
-            answer = span.answer
-            solution = span.solution
-            item = ProblemItem(identifier=identifier, exercise=exercise, answer=answer, solution=solution)
-            if self.enable_llm_solution and self._needs_llm_solution(item):
-                item.llm_solution = self._generate_solution(item.exercise)
-            item.metadata.update({
-                'source': pdf_path,
-                'type': 'pdf-text',
-                'page_start': str(span.start_page),
-                'page_end': str(span.end_page),
-                'extraction_mode': 'text-fallback',
-            })
-            self._ensure_language(item)
-            items.append(item)
-        return items
+    def _extract_span_via_images(self, pdf_path: str, span: TextSpan, idx: int) -> ProblemItem:
+        page_groups = self._select_page_groups(span)
+        if not page_groups:
+            raise ValueError('No page groups available for span')
+        identifier = f"{Path(pdf_path).stem}_q{idx+1}"
+        aggregate: Optional[ProblemItem] = None
+        applied_groups: List[List[int]] = []
+        hint = self._make_question_hint(span.body)
+        logger.info(
+            "Processing span #%d for %s (pages %s-%s) with %d candidate group(s)",
+            idx + 1,
+            pdf_path,
+            span.start_page,
+            span.end_page,
+            len(page_groups),
+        )
+        if hint and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Span #%d hint: %s", idx + 1, hint)
+        for group in page_groups:
+            logger.info("Span #%d trying page group: %s", idx + 1, group)
+            image_paths = self._render_pdf_page_group(pdf_path, group)
+            if not image_paths:
+                logger.warning("Failed to render pages %s for %s; skipping group", group, pdf_path)
+                continue
+            partial = self._extract_problem_from_images(image_paths, identifier=identifier, hint=hint)
+            if not partial.exercise and not partial.answer and not partial.solution:
+                logger.info("Group %s produced empty result, continuing", group)
+                continue
+            if aggregate is None:
+                aggregate = partial
+            else:
+                self._merge_problem_items(aggregate, partial)
+            applied_groups.append(group)
+            if aggregate.exercise and (aggregate.solution or aggregate.answer):
+                logger.info("Span #%d satisfied with current aggregation; stopping group attempts", idx + 1)
+                break
+        if aggregate is None or not aggregate.exercise.strip():
+            logger.warning("Span #%d failed to extract via multimodal path", idx + 1)
+            raise ValueError('Failed to extract problem via multimodal pipeline')
+        if self.enable_llm_solution and self._needs_llm_solution(aggregate):
+            logger.info("Generating LLM solution for span #%d (%s)", idx + 1, identifier)
+            aggregate.llm_solution = self._generate_solution(aggregate.exercise)
+        aggregate.metadata.update({
+            'source': pdf_path,
+            'type': 'pdf-image',
+            'page_start': str(span.start_page),
+            'page_end': str(span.end_page),
+            'extraction_mode': 'multimodal',
+        })
+        if applied_groups:
+            aggregate.metadata['image_groups'] = ';'.join(' '.join(str(p) for p in grp) for grp in applied_groups)
+        if hint:
+            aggregate.metadata['question_hint'] = hint[:200]
+        self._ensure_language(aggregate)
+        return aggregate
+
+    def _extract_span_via_text(self, pdf_path: str, span: TextSpan, idx: int) -> ProblemItem:
+        identifier = f"{Path(pdf_path).stem}_q{idx+1}"
+        logger.info(
+            "Text fallback span #%d for %s (pages %s-%s)",
+            idx + 1,
+            pdf_path,
+            span.start_page,
+            span.end_page,
+        )
+        item = ProblemItem(identifier=identifier, exercise=span.body, answer=span.answer, solution=span.solution)
+        if self.enable_llm_solution and self._needs_llm_solution(item):
+            item.llm_solution = self._generate_solution(item.exercise)
+        item.metadata.update({
+            'source': pdf_path,
+            'type': 'pdf-text',
+            'page_start': str(span.start_page),
+            'page_end': str(span.end_page),
+            'extraction_mode': 'text-fallback',
+        })
+        self._ensure_language(item)
+        return item
 
     def _render_pdf_page_group(self, pdf_path: str, pages: List[int]) -> List[str]:
         normalized = sorted({page for page in pages if page and page > 0})
@@ -558,21 +630,90 @@ class Pipeline:
         return result.text.strip()
 
     def process_inputs(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
-        problems: List[ProblemItem] = []
-        for inp in inputs:
-            if inp.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                logger.info("Dispatching image input: %s", inp)
-                problems.append(self.process_image(inp))
-            elif inp.lower().endswith('.pdf'):
-                logger.info("Dispatching PDF input: %s", inp)
-                problems.extend(self.process_pdf(inp))
-            elif inp.startswith('http://') or inp.startswith('https://'):
-                logger.info("Dispatching URL input: %s", inp)
-                problems.extend(self.process_url(inp, keyword=keyword, max_items=max_items, site=site))
-            else:
-                raise ValueError(f'Unsupported input type: {inp}')
-        logger.info("Rendering %d problem(s) to %s", len(problems), out_dir)
-        return self.render_items(problems, out_dir)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.process_inputs_async(inputs, out_dir, keyword=keyword, max_items=max_items, site=site))
+        else:
+            raise RuntimeError('process_inputs cannot be used when an event loop is running; use await process_inputs_async instead.')
+
+    async def process_inputs_async(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
+        out_dir_path = Path(out_dir)
+        self._reset_render_state(out_dir_path)
+
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def dispatch(inp: str) -> List[str]:
+            async with semaphore:
+                return await asyncio.to_thread(self._process_and_render_input, inp, keyword, max_items, site)
+
+        tasks = [asyncio.create_task(dispatch(inp)) for inp in inputs]
+        generated_paths: List[str] = []
+        for task in asyncio.as_completed(tasks):
+            generated_paths.extend(await task)
+
+        master_path = self._write_master()
+        if master_path not in generated_paths:
+            generated_paths.append(master_path)
+        logger.info("Rendered %d problem(s) to %s (async)", len(self._rendered_rel_paths), out_dir)
+        return generated_paths
+
+    def _process_and_render_input(self, inp: str, keyword: Optional[str], max_items: Optional[int], site: Optional[str]) -> List[str]:
+        generated_paths: List[str] = []
+
+        def sink(item: ProblemItem) -> None:
+            generated_paths.append(self._render_problem(item))
+
+        if inp.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+            logger.info("Dispatching image input: %s", inp)
+            item = self.process_image(inp)
+            sink(item)
+        elif inp.lower().endswith('.pdf'):
+            logger.info("Dispatching PDF input: %s", inp)
+            items = self.process_pdf(inp, on_item=sink)
+            if not items:
+                logger.warning("No problems extracted from PDF %s", inp)
+        elif inp.startswith('http://') or inp.startswith('https://'):
+            logger.info("Dispatching URL input: %s", inp)
+            for item in self.process_url(inp, keyword=keyword, max_items=max_items, site=site):
+                sink(item)
+        else:
+            raise ValueError(f'Unsupported input type: {inp}')
+        return generated_paths
+
+    def _compute_page_legibility(self, page_text: Dict[int, str]) -> Dict[int, float]:
+        scores: Dict[int, float] = {}
+        for page, text in page_text.items():
+            scores[page] = self._legibility_score(text)
+        return scores
+
+    @staticmethod
+    def _legibility_score(text: str) -> float:
+        meaningful = 0
+        total = 0
+        for ch in text:
+            if ch.isspace():
+                continue
+            total += 1
+            code = ord(ch)
+            if '0' <= ch <= '9' or 'a' <= ch <= 'z' or 'A' <= ch <= 'Z':
+                meaningful += 1
+            elif 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or 0x20000 <= code <= 0x2A6DF:
+                meaningful += 1
+        if total == 0:
+            return 0.0
+        return meaningful / total
+
+    def _build_window_spans(self, page_numbers: List[int]) -> List[TextSpan]:
+        if not page_numbers:
+            return []
+        window = max(1, self.config.window_span_pages)
+        spans: List[TextSpan] = []
+        total = len(page_numbers)
+        for idx, start_page in enumerate(page_numbers):
+            end_index = min(idx + window - 1, total - 1)
+            spans.append(TextSpan(start_page=start_page, end_page=page_numbers[end_index], body=''))
+        return spans
 
 
 def process_inputs(inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:

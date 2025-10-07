@@ -16,6 +16,8 @@ Leverage OpenRouter's multimodal/language models and local OCR capabilities to e
 
 This project was born out of the need to earn NJU labor education hours. When professors require you to organize question banks in TeX to earn these hours, why not adopt a faster solution?
 
+> **Note**: All test files in the `tests/` directory are examples that can be successfully processed.
+
 ## Key Features
 
 - **Multiple Input Channels**: Images, PDFs (automatically distinguish text-based/scanned), URLs; batch fetching from Math Stack Exchange / MathOverflow using APIs.
@@ -118,13 +120,15 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 
 ## TO-DO LIST
 
+- [x] Emit each problem to its own TeX file immediately after processing.
+- [x] Fix issues with Chinese PDFs being processed as garbled text, preventing correct problem segmentation.
 - [ ] Generate a correct and aesthetically pleasing `master.tex` file, including table of contents, chapters, and even references.
 - [ ] Handle obvious error responses, such as returning multiple questions at once, incorrect JSON, or Markdown syntax in LLM-generated answers.
 - [ ] Test scanned PDFs.
 - [ ] Test cases where answers appear at the back of the book.
 - [ ] Construct appropriate prompts for cases involving exchange diagrams and test them.
 - [ ] Improve and test batch fetching from MathStackExchange and URL-based solutions.
-- [ ] Add asynchronous processing to improve speed.
+- [x] Add asynchronous processing to improve speed.
 - [ ] Include local solutions suitable for Chinese OCR.
 - [ ] Build better preprocessing schemes to reduce hallucinations from large models.
 - [ ] More precise PDF question segmentation (based on layout analysis or deep learning).

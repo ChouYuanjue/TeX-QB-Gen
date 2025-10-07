@@ -1,3 +1,20 @@
+## [0.4.1] - 2025-10-07
+### Fixed
+- Addressed issues with Chinese PDF segmentation and garbled text handling.
+
+### Changed
+- Updated TO-DO list to reflect completed tasks and new priorities.
+
+## [0.4.0] - 2025-10-07
+### Added
+- Asynchronous pipeline entry point with configurable concurrency (`TEXBANK_CONCURRENCY`) to parallelise image/PDF/URL processing.
+- Thread-safe, per-question TeX emission that regenerates `master.tex` immediately after each problem is rendered.
+- Test coverage for the async workflow to ensure incremental rendering remains stable under concurrent workloads.
+
+### Documentation
+- README/README_zh-CN expanded with bilingual cross-links, banner, and usage notes aligned with the new processing flow.
+
+
 ## [0.3.0] - 2025-10-06
 ### Added
 - Verbose/debug logging switches and granular progress logs for PDF parsing, multimodal extraction, fallbacks, and rendering.
