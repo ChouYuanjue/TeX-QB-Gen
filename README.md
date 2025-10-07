@@ -132,4 +132,4 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 - [ ] Add a Web UI for visualized generation and management of question banks.
 - [ ] Add automatic validation or symbolic computation checks for `Solution (by LLM)`.
 
-欢迎提交 issue 与 PR 共同完善。
+Feel free to open issues and submit PRs.
