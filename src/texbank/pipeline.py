@@ -279,7 +279,7 @@ class Pipeline:
             fallback_texts = []
             for path in image_paths:
                 try:
-                    fallback_texts.append(image_to_text(path))
+                    fallback_texts.append(image_to_text(path, self.config.ocr_engine))
                 except Exception as ocr_exc:
                     logger.debug("OCR fallback failed for %s: %s", path, ocr_exc, exc_info=True)
                     continue

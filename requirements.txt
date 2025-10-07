@@ -9,3 +9,5 @@ pdf2image
 tqdm
 lxml
 regex
+paddlepaddle
+paddleocr

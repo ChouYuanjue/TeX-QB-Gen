@@ -45,6 +45,7 @@ Copy `.env.example` to `.env` and fill in the following:
 - `STACKEXCHANGE_KEY` (optional): Enhance StackExchange API quota.
 - `TESSERACT_CMD` (optional): Path to Tesseract executable on Windows.
 - `TEXBANK_DEFAULT_LANGUAGE` (optional): Default output language, supports `auto` (retain original), `zh` (Chinese), `en` (English).
+- `TEXBANK_OCR_ENGINE` (optional): OCR engine, supports `tesseract` (default) or `paddle` (suitable for Chinese).
 
 ### 3. Tesseract OCR (Local Backup)
 
@@ -129,7 +130,7 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 - [ ] Construct appropriate prompts for cases involving exchange diagrams and test them.
 - [ ] Improve and test batch fetching from MathStackExchange and URL-based solutions.
 - [x] Add asynchronous processing to improve speed.
-- [ ] Include local solutions suitable for Chinese OCR.
+- [x] Include local solutions suitable for Chinese OCR.
 - [ ] Build better preprocessing schemes to reduce hallucinations from large models.
 - [ ] More precise PDF question segmentation (based on layout analysis or deep learning).
 - [ ] Test higher-accuracy multimodal models and automatically compare costs.

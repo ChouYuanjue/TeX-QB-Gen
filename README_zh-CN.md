@@ -45,6 +45,7 @@ pip install -r requirements.txt
 - `STACKEXCHANGE_KEY`（可选）：提升 StackExchange API 配额。
 - `TESSERACT_CMD`（可选）：Windows 上 Tesseract 可执行文件路径。
 - `TEXBANK_DEFAULT_LANGUAGE`（可选）：默认输出语言，支持 `auto`（保持原文）、`zh`（中文）、`en`（英文）。
+- `TEXBANK_OCR_ENGINE`（可选）：OCR 引擎，支持 `tesseract`（默认）或 `paddle`（适用于中文）。
 
 ### 3. Tesseract OCR（本地备用）
 
@@ -130,7 +131,7 @@ pytest
 - [ ] 对包含交换图的情况构建合适的提示词并进行测试。
 - [ ] 对MathStackExchange的批量获取以及从URL获取的方案进行完善和测试。
 - [x] 增加异步，提高处理速度。
-- [ ] 加入适合中文 OCR 的本地方案。
+- [x] 加入适合中文 OCR 的本地方案。
 - [ ] 构建更合适的预处理方案，减少大模型产生的幻觉。
 - [ ] 更精细的 PDF 题目切分（基于版式分析或深度学习）。
 - [ ] 接入更高精度的多模态模型测试并自动成本对比。

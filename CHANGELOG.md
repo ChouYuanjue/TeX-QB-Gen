@@ -1,3 +1,12 @@
+## [0.4.2] - 2025-10-07
+### Added
+- Integrated PaddleOCR as an alternative OCR engine for better Chinese text recognition.
+- Added `TEXBANK_OCR_ENGINE` configuration to choose between 'tesseract' and 'paddle' OCR engines.
+- Updated Tesseract to include Chinese language support by default.
+
+### Changed
+- Enhanced OCR module to support multiple engines with configurable selection.
+
 ## [0.4.1] - 2025-10-07
 ### Fixed
 - Addressed issues with Chinese PDF segmentation and garbled text handling.
