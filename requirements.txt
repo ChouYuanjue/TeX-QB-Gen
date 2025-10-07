@@ -1,0 +1,11 @@
+requests
+beautifulsoup4
+pytesseract
+Pillow
+PyMuPDF
+openai
+python-dotenv
+pdf2image
+tqdm
+lxml
+regex
