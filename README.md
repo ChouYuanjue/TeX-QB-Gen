@@ -14,7 +14,7 @@ Leverage OpenRouter's multimodal/text models and local OCR capabilities to extra
 
 ## Background
 
-This project was born out of the need to earn NJU labor education hours. When professors require organizing question banks in TeX to earn these hours, why not adopt a faster solution?
+This project was born out of the need to earn NJU labor education hours. When professors require you to organize question banks in TeX to earn these hours, why not adopt a faster solution?
 
 ## Key Features
 
