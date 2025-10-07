@@ -2,7 +2,7 @@
 
 English | [简体中文](README_zh-CN.md)
 
-<img src="assets/banner.jpg" width="1000px"  alt="TEXQBGEN"/>  
+<img src="assets/banner.jpg" width="640px"  alt="TEXQBGEN"/>  
 
 </div>
 
