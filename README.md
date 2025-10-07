@@ -124,7 +124,7 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 - [x] Emit each problem to its own TeX file immediately after processing.
 - [x] Fix issues with Chinese PDFs being processed as garbled text, preventing correct problem segmentation.
 - [ ] Generate a correct and aesthetically pleasing `master.tex` file, including table of contents, chapters, and even references.
-- [ ] Handle obvious error responses, such as returning multiple questions at once, incorrect JSON, or Markdown syntax in LLM-generated answers.
+- [x] Handle obvious error responses, such as returning multiple questions at once, incorrect JSON, or Markdown syntax in LLM-generated answers.
 - [ ] Test scanned PDFs.
 - [ ] Test cases where answers appear at the back of the book.
 - [ ] Construct appropriate prompts for cases involving exchange diagrams and test them.

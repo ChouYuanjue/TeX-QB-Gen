@@ -158,7 +158,11 @@ class OpenRouterClient:
         result = self.generate_text(guidance, model, max_tokens=max_tokens, temperature=temperature, system=system)
         parsed = self._safe_json(result.text)
         if parsed is None:
-            raise ValueError('LLM response is not valid JSON. Received: %s' % result.text[:200])
+            # Try to fix common issues and retry once
+            fixed_text = self._fix_llm_response(result.text)
+            parsed = self._safe_json(fixed_text)
+            if parsed is None:
+                raise ValueError('LLM response is not valid JSON even after fixing. Received: %s' % result.text[:500])
         return parsed
 
     def generate_from_image(self, image_path: Sequence[str] | str, model: str, *, prompt: str, system: Optional[str] = None, temperature: float = 0.0, max_tokens: int = 1200) -> Dict[str, Any]:
@@ -196,18 +200,69 @@ class OpenRouterClient:
         return parsed
 
     @staticmethod
+    def _fix_llm_response(text: str) -> str:
+        """Attempt to fix common LLM response issues like markdown formatting."""
+        # Remove markdown code blocks
+        if '```' in text:
+            # Remove code block markers
+            lines = text.split('\n')
+            cleaned_lines = []
+            in_code_block = False
+            for line in lines:
+                if line.strip().startswith('```'):
+                    in_code_block = not in_code_block
+                    continue
+                if not in_code_block:
+                    cleaned_lines.append(line)
+            text = '\n'.join(cleaned_lines)
+        
+        # Remove common prefixes/suffixes
+        text = text.strip()
+        prefixes_to_remove = ['Here is the JSON:', 'JSON:', 'Response:', 'Answer:']
+        for prefix in prefixes_to_remove:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        
+        # Ensure it starts with { or [
+        text = text.lstrip('`').lstrip()
+        
+        return text
+
+    @staticmethod
     def _safe_json(text: str) -> Optional[Dict[str, Any]]:
         candidate = text.strip()
+        
+        # Remove markdown code blocks
         if candidate.startswith('```'):
             candidate = candidate.split('\n', 1)[-1]
             if candidate.endswith('```'):
                 candidate = candidate[:-3]
+        
+        # Remove common prefixes
+        prefixes_to_remove = ['Here is the JSON:', 'JSON:', 'Response:', 'Answer:', 'Here is the result:']
+        for prefix in prefixes_to_remove:
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix):].strip()
+        
+        # Find JSON boundaries
         start = candidate.find('{')
         end = candidate.rfind('}')
         if start == -1 or end == -1 or end <= start:
-            return None
+            # Try array format
+            start = candidate.find('[')
+            end = candidate.rfind(']')
+            if start == -1 or end == -1 or end <= start:
+                return None
+        
+        json_str = candidate[start:end + 1]
+        
+        # Clean up common issues
+        json_str = json_str.replace('```', '')  # Remove any remaining markdown
+        json_str = json_str.replace('\n', ' ')  # Remove newlines within JSON
+        json_str = ' '.join(json_str.split())  # Normalize whitespace
+        
         try:
-            return json.loads(candidate[start:end + 1])
+            return json.loads(json_str)
         except json.JSONDecodeError:
             return None
 

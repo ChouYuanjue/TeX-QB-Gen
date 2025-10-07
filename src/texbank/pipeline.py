@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 class Pipeline:
     IMAGE_SYSTEM = (
-        "你是一个数学题目整理助手，所有输出都必须是 JSON 对象，仅包含 exercise, answer, solution 三个字段。"
+        "你是一个数学题目整理助手，所有输出都必须是严格的JSON对象，仅包含exercise, answer, solution三个字段。"
+        "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
+        "如果内容包含数学公式，请确保使用正确的LaTeX命令如$...$或\\[...\\]。"
     )
 
     def __init__(self, config: Optional[PipelineConfig] = None, *, enable_llm_solution: bool = True, language: Optional[str] = None):
@@ -169,11 +171,14 @@ class Pipeline:
         text = soup.get_text('\n', strip=True)
         system_prompt = (
             "你是一名数学题目整理助手，请根据用户提供的网页正文提取题目。"
-            "输出必须是 JSON 数组，每项包含 title, body, answers(列表，可空)。"
+            "输出必须是JSON数组，每项包含title, body, answers(列表，可空)。"
+            "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
+            "公式使用$...$或\\[...\\]。"
         )
         user_prompt = (
             "请从以下网页正文中提取所有数学题目及可能的解答。"
-            "保持原有数学符号与 LaTeX 表达，可根据上下文补全标题。"
+            "保持原有数学符号与LaTeX表达，可根据上下文补全标题。"
+            "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
             f"\n\n{text}"
         )
         schema = '[{"title": "string", "body": "string", "answers": ["string"]}]'
@@ -480,8 +485,10 @@ class Pipeline:
 
     def _build_image_prompt(self, hint: Optional[str]) -> str:
         header = (
-            "请识别图片中的数学题目与解答，并以 JSON 返回：{\"exercise\":题干, \"answer\":原答案(可选), \"solution\":原详细解答(可选)}。"
-            "若没有解答，请留空。保持原有 LaTeX 语法。"
+            "请识别图片中的数学题目与解答，并以JSON返回：{\"exercise\":题干, \"answer\":原答案(可选), \"solution\":原详细解答(可选)}。"
+            "所有数学内容必须使用LaTeX语法，不要使用Markdown格式如**bold**或*italic*。"
+            "如果没有解答，请将对应字段设置为空字符串\"\"。"
+            "保持原有LaTeX语法，公式使用$...$或\\[...\\]。"
         )
         if hint:
             return (
@@ -522,6 +529,12 @@ class Pipeline:
             'answer': self._ensure_text(parts.get('answer')),
             'solution': self._ensure_text(parts.get('solution')),
         }
+        
+        # Clean markdown from all text fields
+        for key in ['exercise', 'answer', 'solution']:
+            if normalized.get(key):
+                normalized[key] = self._clean_markdown_from_text(normalized[key])
+        
         exercise = normalized.get('exercise') or ''
         if exercise.startswith('{') and exercise.endswith('}'):
             try:
@@ -529,6 +542,10 @@ class Pipeline:
                 normalized['exercise'] = self._ensure_text(embedded.get('exercise')) or normalized['exercise']
                 normalized['answer'] = normalized['answer'] or self._ensure_text(embedded.get('answer'))
                 normalized['solution'] = normalized['solution'] or self._ensure_text(embedded.get('solution'))
+                # Clean markdown from embedded fields too
+                for key in ['exercise', 'answer', 'solution']:
+                    if normalized.get(key):
+                        normalized[key] = self._clean_markdown_from_text(normalized[key])
             except json.JSONDecodeError:
                 pass
 
@@ -624,10 +641,46 @@ class Pipeline:
         return True
 
     def _generate_solution(self, exercise: str) -> str:
-        system = "你是一名数学教师，请给出严谨详细的解答，并以中文描述，保留原始符号的 LaTeX 写法。"
+        system = (
+            "你是一名数学教师，请给出严谨详细的解答，并以中文描述，保留原始符号的LaTeX写法。"
+            "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
+            "如果需要强调，请使用\\textbf{}而不是**bold**。"
+            "公式使用$...$内联或\\[...\\]显示。"
+        )
         prompt = f"请为下面的题目写出详细解答，并在开头加入句子：'由LLM生成的解答可能不准确，请自行验证。'\n\n{exercise}"
         result = self.client.generate_text(prompt, self.config.models.text_reasoning, system=system, max_tokens=1200, temperature=0.1)
-        return result.text.strip()
+        # Clean up any remaining markdown
+        cleaned = self._clean_markdown_from_text(result.text.strip())
+        return cleaned
+
+    @staticmethod
+    def _clean_markdown_from_text(text: str) -> str:
+        """Remove markdown formatting and convert to LaTeX equivalents."""
+        import re
+        
+        # Convert **bold** to \textbf{bold}
+        text = re.sub(r'\*\*(.*?)\*\*', r'\\textbf{\1}', text)
+        
+        # Convert *italic* to \textit{italic}
+        text = re.sub(r'\*(.*?)\*', r'\\textit{\1}', text)
+        
+        # Remove markdown headers
+        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+        
+        # Convert markdown lists to LaTeX items (basic)
+        text = re.sub(r'^\s*[-*+]\s+', r'\\item ', text, flags=re.MULTILINE)
+        
+        # Remove markdown links but keep text
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+        
+        # Remove code blocks markers but keep content
+        text = re.sub(r'```[^\n]*\n', '', text)
+        text = re.sub(r'```', '', text)
+        
+        # Remove inline code markers
+        text = re.sub(r'`([^`]+)`', r'\\texttt{\1}', text)
+        
+        return text
 
     def process_inputs(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
         try:

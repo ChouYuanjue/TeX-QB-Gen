@@ -1,3 +1,13 @@
+## [0.4.3] - 2025-10-07
+### Added
+- Enhanced error handling for LLM responses with automatic JSON parsing fixes.
+- Markdown-to-LaTeX conversion for LLM-generated content to ensure proper TeX output.
+- Improved prompts to explicitly require LaTeX syntax instead of Markdown.
+
+### Fixed
+- Better handling of malformed JSON responses from LLMs.
+- Automatic cleanup of markdown formatting in extracted mathematical content.
+
 ## [0.4.2] - 2025-10-07
 ### Added
 - Integrated PaddleOCR as an alternative OCR engine for better Chinese text recognition.
