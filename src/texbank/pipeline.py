@@ -8,7 +8,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup  # type: ignore[import]
@@ -28,6 +28,162 @@ from .web_utils import fetch_url
 
 logger = logging.getLogger(__name__)
 
+
+_MATH_BLOCK_PATTERN = re.compile(
+    r'(\$\$.*?\$\$|\$[^$]*\$|\\\[.*?\\\]|\\\(.*?\\\)|'
+    r'\\begin\{(?P<env>(?:align\*?|equation\*?|gather\*?|multline\*?|cases|array|pmatrix|bmatrix|vmatrix|Vmatrix|smallmatrix|matrix))\}.*?\\end\{(?P=env)\})',
+    re.DOTALL,
+)
+
+def _split_math_segments(text: str) -> List[Tuple[str, str]]:
+    segments: List[Tuple[str, str]] = []
+    last = 0
+    for match in _MATH_BLOCK_PATTERN.finditer(text):
+        start, end = match.span()
+        if start > last:
+            segments.append(('text', text[last:start]))
+        segments.append(('math', match.group(0)))
+        last = end
+    if last < len(text):
+        segments.append(('text', text[last:]))
+    return segments
+
+
+def _normalize_math_segment(segment: str) -> str:
+    segment = segment.replace(r'\&', '&')
+    segment = segment.replace(r'\%', '%')
+    segment = segment.replace(r'\n', ' ')
+    return segment
+
+
+def _escape_text_segment(segment: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        mapping = {
+            '&': r'\&',
+            '%': r'\%',
+            '$': r'\$',
+            '#': r'\#',
+            '_': r'\_',
+        }
+        return mapping.get(match.group(0), match.group(0))
+
+    segment = re.sub(r'(?<!\\)[&%$#_]', repl, segment)
+    segment = segment.replace('~', r'\textasciitilde{}')
+    segment = re.sub(r'(?<!\\)\^', r'\^{}', segment)
+    return segment
+
+
+def _convert_markdown_tables(segment: str) -> str:
+    if '|' not in segment:
+        return segment
+    lines = segment.splitlines()
+    output: List[str] = []
+    i = 0
+    while i < len(lines):
+        if _is_markdown_table_header(lines, i):
+            j = i
+            table_lines: List[str] = []
+            while j < len(lines) and lines[j].strip() and '|' in lines[j]:
+                table_lines.append(lines[j])
+                j += 1
+            output.append(_markdown_table_to_tabular(table_lines))
+            i = j
+            continue
+        output.append(lines[i])
+        i += 1
+    return '\n'.join(output)
+
+
+def _is_markdown_table_header(lines: List[str], index: int) -> bool:
+    if index + 1 >= len(lines):
+        return False
+    header = lines[index]
+    separator = lines[index + 1]
+    if '|' not in header or '|' not in separator:
+        return False
+    if not header.strip() or not separator.strip():
+        return False
+    if not re.match(r'^\s*\|?\s*[:\-\s\|]+\|?\s*$', separator):
+        return False
+    return True
+
+
+def _markdown_table_to_tabular(table_lines: List[str]) -> str:
+    rows: List[List[str]] = []
+    for line in table_lines:
+        stripped = line.strip()
+        if not stripped or '|' not in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip('|').split('|')]
+        rows.append(cells)
+    if not rows:
+        return '\\textit{表格内容解析失败}'
+    max_cols = max(len(row) for row in rows)
+    for row in rows:
+        if len(row) < max_cols:
+            row.extend([''] * (max_cols - len(row)))
+    align = 'c' * max_cols
+    latex_lines = ['\\begin{tabular}{' + align + '}', '\\hline']
+    for idx, row in enumerate(rows):
+        latex_row = ' & '.join(row) + ' \\\\'
+        latex_lines.append(latex_row)
+        if idx == 0:
+            latex_lines.append('\\hline')
+    latex_lines.append('\\hline')
+    latex_lines.append('\\end{tabular}')
+    return '\n'.join(latex_lines)
+
+
+def _balance_math_delimiters(text: str) -> str:
+    if text.count('$') % 2 != 0:
+        text += '$'
+    open_brackets = text.count(r'\[')
+    close_brackets = text.count(r'\]')
+    if open_brackets > close_brackets:
+        text += r'\]'
+    return text
+
+
+def _extract_text_from_json(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict):
+        for key in ('solution', 'answer', 'exercise', 'content', 'text'):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        for value in obj.values():
+            nested = _extract_text_from_json(value)
+            if nested:
+                return nested
+    elif isinstance(obj, list):
+        for item in obj:
+            nested = _extract_text_from_json(item)
+            if nested:
+                return nested
+    return None
+
+
+def _strip_structured_wrappers(text: str) -> str:
+    candidate = text.strip()
+    if not candidate:
+        return text
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(candidate):
+        try:
+            obj, end = decoder.raw_decode(candidate[index:])
+        except json.JSONDecodeError:
+            next_object = candidate.find('{', index + 1)
+            next_array = candidate.find('[', index + 1)
+            options = [pos for pos in (next_object, next_array) if pos != -1]
+            if not options:
+                break
+            index = min(options)
+            continue
+        extracted = _extract_text_from_json(obj)
+        if extracted:
+            return extracted
+        index += end
+    return text
 
 class Pipeline:
     IMAGE_SYSTEM = (
@@ -113,7 +269,8 @@ class Pipeline:
         for idx, image_path in enumerate(images):
             item = self.process_image(image_path)
             item.identifier = f"{Path(pdf_path).stem}_scan_{idx+1}"
-            item.metadata.update({'source_pdf': pdf_path, 'page': str(candidate_pages[idx] if idx < len(candidate_pages) else '?')})
+            page_label = candidate_pages[idx] if idx < len(candidate_pages) else '?'
+            item.metadata.update({'source_pdf': pdf_path, 'page': str(page_label)})
             self._ensure_language(item)
             items.append(item)
             if on_item:
@@ -752,135 +909,60 @@ class Pipeline:
             "转义特殊字符，如&写成\\&。"
             "确保公式完整，不缺少$符号。"
         )
-        prompt = f"请为下面的题目写出详细解答，并在开头加入句子：'由LLM生成的解答可能不准确，请自行验证。'\n\n{exercise}\n\n请直接返回LaTeX格式的解答，不要包含JSON包装。"
-        result = self.client.generate_text(prompt, self.config.models.text_reasoning, system=system, max_tokens=1200, temperature=0.1)
-        # Clean up any remaining markdown or JSON
-        cleaned = self._clean_markdown_from_text(result.text.strip())
-        cleaned = self._clean_json_from_text(cleaned)
+        prompt = (
+            "请为下面的题目写出详细解答，并在开头加入句子：'由LLM生成的解答可能不准确，请自行验证。'"
+            f"\n\n{exercise}\n\n请直接返回LaTeX格式的解答，不要包含JSON包装。"
+        )
+        result = self.client.generate_text(
+            prompt,
+            self.config.models.text_reasoning,
+            system=system,
+            max_tokens=1200,
+            temperature=0.1,
+        )
+        raw_text = result.text.strip()
+        cleaned = self._clean_json_from_text(raw_text)
+        cleaned = self._clean_markdown_from_text(cleaned)
         cleaned = self._fix_latex_issues(cleaned)
-        return cleaned
+        return cleaned.strip()
 
     @staticmethod
     def _clean_markdown_from_text(text: str) -> str:
-        """Remove markdown formatting and convert to LaTeX equivalents."""
-        import re
-        
-        # Convert **bold** to \textbf{bold}
-        text = re.sub(r'\*\*(.*?)\*\*', r'\\textbf{\1}', text)
-        
-        # Convert *italic* to \textit{italic}
-        text = re.sub(r'\*(.*?)\*', r'\\textit{\1}', text)
-        
-        # Remove markdown headers
-        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
-        
-        # Convert markdown lists to LaTeX items (basic)
-        text = re.sub(r'^\s*[-*+]\s+', r'\\item ', text, flags=re.MULTILINE)
-        
-        # Remove markdown links but keep text
-        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-        
-        # Remove code blocks markers but keep content
-        text = re.sub(r'```[^\n]*\n', '', text)
-        text = re.sub(r'```', '', text)
-        
-        # Remove inline code markers
-        text = re.sub(r'`([^`]+)`', r'\\texttt{\1}', text)
-        
-        # Convert markdown tables to LaTeX tabular (basic)
-        # This is a simple conversion; complex tables may need manual adjustment
-        lines = text.split('\n')
-        in_table = False
-        table_lines = []
-        for line in lines:
-            if '|' in line and not in_table:
-                in_table = True
-                table_lines.append(line)
-            elif '|' in line and in_table:
-                table_lines.append(line)
-            elif in_table and line.strip() == '':
-                # End of table
-                if table_lines:
-                    # Convert to LaTeX tabular
-                    header = table_lines[0].strip().split('|')[1:-1]
-                    num_cols = len(header)
-                    latex_table = '\\begin{tabular}{' + 'c' * num_cols + '}\n\\hline\n'
-                    for i, tline in enumerate(table_lines):
-                        cells = [cell.strip() for cell in tline.strip().split('|')[1:-1]]
-                        latex_table += ' & '.join(cells) + ' \\\\\n'
-                        if i == 0:
-                            latex_table += '\\hline\n'
-                    latex_table += '\\hline\n\\end{tabular}'
-                    text = text.replace('\n'.join(table_lines), latex_table)
-                    table_lines = []
-                in_table = False
-            else:
-                if in_table:
-                    table_lines.append(line)
-                if in_table and line.strip() == '':
-                    in_table = False
-        
-        return text
+        segments = _split_math_segments(text)
+        cleaned: List[str] = []
+        for kind, segment in segments:
+            if kind == 'math':
+                cleaned.append(_normalize_math_segment(segment))
+                continue
+            segment = _convert_markdown_tables(segment)
+            segment = re.sub(r'\*\*(.*?)\*\*', r'\\textbf{\1}', segment)
+            segment = re.sub(r'(?<!\*)\*(?!\s)(.*?)(?<!\s)\*', r'\\textit{\1}', segment)
+            segment = re.sub(r'^#+\s+', '', segment, flags=re.MULTILINE)
+            segment = re.sub(r'^\s*[-*+]\s+', r'\\textbullet\ ', segment, flags=re.MULTILINE)
+            segment = re.sub(r'^\s*\d+\.\s+', r'\\textbf{\g<0>}', segment, flags=re.MULTILINE)
+            segment = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', segment)
+            segment = re.sub(r'```[^\n]*\n', '', segment)
+            segment = segment.replace('```', '')
+            segment = re.sub(r'`([^`]+)`', r'\\texttt{\1}', segment)
+            cleaned.append(_escape_text_segment(segment))
+        return ''.join(cleaned)
 
     @staticmethod
     def _clean_json_from_text(text: str) -> str:
-        """Remove JSON formatting if present."""
-        import re
-        import json
-        
-        # Try to detect if it's JSON
-        stripped = text.strip()
-        if stripped.startswith('{') and stripped.endswith('}'):
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict) and 'solution' in parsed:
-                    return parsed['solution']
-                elif isinstance(parsed, dict) and 'answer' in parsed:
-                    return parsed['answer']
-                elif isinstance(parsed, dict) and 'llm_solution' in parsed:
-                    return parsed['llm_solution']
-            except json.JSONDecodeError:
-                pass
-        
-        # Remove JSON-like prefixes
-        text = re.sub(r'^\s*\{\s*"[^"]*"\s*:\s*"', '', text)
-        text = re.sub(r'"\s*\}\s*$', '', text)
-        
-        # Remove any remaining JSON keys
-        text = re.sub(r'"[^"]*"\s*:\s*', '', text)
-        
-        return text
+        return _strip_structured_wrappers(text)
 
     @staticmethod
     def _fix_latex_issues(text: str) -> str:
-        """Fix common LaTeX issues."""
-        import re
-        
-        # Escape special characters in text mode (but not in math mode)
-        # This is complex; for now, escape common ones
-        text = text.replace('&', r'\&')
-        text = text.replace('%', r'\%')
-        text = text.replace('#', r'\#')
-        # _ and ^ are handled in math mode
-        
-        # Fix common undefined control sequences
-        # Remove \n which is not defined in LaTeX
-        text = re.sub(r'\\[nN]', ' ', text)
-        
-        # Ensure math formulas are properly closed
-        # Count $ and balance them (simple check)
-        dollar_count = text.count('$')
-        if dollar_count % 2 != 0:
-            # Add missing $ at the end if odd number
-            text += '$'
-        
-        # Similar for \[ and \]
-        open_bracket = text.count(r'\[')
-        close_bracket = text.count(r'\]')
-        if open_bracket > close_bracket:
-            text += r'\]'
-        
-        return text
+        segments = _split_math_segments(text)
+        fixed_parts: List[str] = []
+        for kind, segment in segments:
+            if kind == 'math':
+                fixed_parts.append(_normalize_math_segment(segment))
+            else:
+                fixed_parts.append(_escape_text_segment(segment))
+        merged = ''.join(fixed_parts)
+        merged = merged.replace('\\n', ' ')
+        return _balance_math_delimiters(merged)
 
     def process_inputs(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
         try:

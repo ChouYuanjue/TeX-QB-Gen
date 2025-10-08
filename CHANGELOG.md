@@ -1,3 +1,14 @@
+## [0.4.6] - 2025-10-08
+### Fixed
+- Added math-aware cleaning for LLM responses to preserve math environments and avoid over-escaping in formulas.
+- Improved Markdown-to-LaTeX conversion (better table -> tabular conversion) and robust JSON wrapper extraction from LLM outputs.
+- Fixed scanned-PDF fallback path (indentation/variable bugs) and ensured page labeling is correct for scanned pages.
+- Improved post-processing pipeline to balance math delimiters and restore math alignment characters inside math mode.
+
+### Changed
+- Switched to a normalization pipeline for LLM solution text that first strips structured wrappers, converts markdown, then sanitizes LaTeX.
+- Added helper utilities for math segmentation and sanitization in `pipeline.py`.
+
 ## [0.4.5] - 2025-10-08
 ### Fixed
 - Improved LLM solution generation to return pure LaTeX text instead of JSON format.
