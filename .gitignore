@@ -132,3 +132,6 @@ $RECYCLE.BIN/
 *~
 .fuse_hidden*
 .nfs*
+
+*.aux
+*.toc
