@@ -8,6 +8,7 @@
 ### Changed
 - Switched to a normalization pipeline for LLM solution text that first strips structured wrappers, converts markdown, then sanitizes LaTeX.
 - Added helper utilities for math segmentation and sanitization in `pipeline.py`.
+- Updated `render_master` to use natural sorting so numbered questions appear in intuitive order.
 
 ## [0.4.5] - 2025-10-08
 ### Fixed

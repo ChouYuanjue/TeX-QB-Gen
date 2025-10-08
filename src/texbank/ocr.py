@@ -56,13 +56,23 @@ def _paddle_image_to_text(image_path: str) -> str:
     if not paddle_available:
         raise RuntimeError('PaddleOCR not available. Please install paddlepaddle and paddleocr via pip.')
     
+    # Load image with PIL and convert to numpy array
+    img = Image.open(image_path)
+    import numpy as np
+    img_array = np.array(img)
+    
     # Initialize PaddleOCR with Chinese support
     ocr = PaddleOCR(use_angle_cls=True, lang='ch')
-    result = ocr.ocr(image_path)
+    result = ocr.ocr(img_array)
     
     if result is None or len(result) == 0 or result[0] is None:
         return ""
     
-    # Extract text from results - result[0] contains the OCR data
-    rec_texts = result[0].get('rec_texts', [])
-    return '\n'.join(rec_texts)
+    # Extract text from results - result[0] is a list of [bbox, (text, confidence)]
+    texts = []
+    for line in result[0]:
+        if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 1:
+            text = line[1][0]
+            if text.strip():
+                texts.append(text)
+    return '\n'.join(texts)

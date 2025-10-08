@@ -6,6 +6,7 @@ import pytest  # type: ignore[import]
 from texbank.models import ProblemItem  # type: ignore[import]
 from texbank.pdf_utils import TextSpan, extract_keyword_spans  # type: ignore[import]
 from texbank.pipeline import Pipeline  # type: ignore[import]
+from texbank.texgen import render_master  # type: ignore[import]
 
 
 class DummyClient:
@@ -23,8 +24,13 @@ class DummyClient:
         self.captured_prompts.append(prompt)
         return type('obj', (), {'text': '由LLM生成的解答可能不准确，请自行验证。\n详细解答'})
 
-    def generate_structured(self, *_args, **__kwargs):
-        return []
+    def generate_structured(self, prompt, *_, **__):
+        self.captured_prompts.append(prompt)
+        return {
+            "exercise": "示例题目(LaTeX)",
+            "answer": "",
+            "solution": ""
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -130,3 +136,37 @@ def test_low_legibility_pdf_falls_back(monkeypatch):
     result = pipeline.process_pdf('dummy.pdf')
     assert result == []
     assert captured.get('count', 0) >= 3
+
+
+def test_text_fallback_triggers_llm_refinement(monkeypatch):
+    pipeline = Pipeline(enable_llm_solution=False)
+    span = TextSpan(start_page=1, end_page=1, body='raw OCR 内容', answer=None, solution=None)
+    item = pipeline._extract_span_via_text('dummy.pdf', span, 0)
+    assert item.exercise.startswith('示例题目')
+    assert item.metadata.get('llm_text_refined') == 'true'
+
+
+def test_render_master_uses_natural_sort(tmp_path):
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+
+    def write_tex(name: str, content: str) -> None:
+        path = out_dir / f'{name}.tex'
+        path.write_text(
+            '\\documentclass{article}\n\\begin{document}\n' + content + '\n\\end{document}',
+            encoding='utf-8',
+        )
+
+    write_tex('topic_q1', 'CONTENT-1')
+    write_tex('topic_q10', 'CONTENT-10')
+    write_tex('topic_q2', 'CONTENT-2')
+
+    master_path = tmp_path / 'master.tex'
+    render_master(out_dir.as_posix(), master_path.as_posix())
+    compiled = master_path.read_text(encoding='utf-8')
+
+    idx1 = compiled.index('CONTENT-1')
+    idx2 = compiled.index('CONTENT-2')
+    idx10 = compiled.index('CONTENT-10')
+
+    assert idx1 < idx2 < idx10

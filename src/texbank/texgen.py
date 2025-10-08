@@ -1,7 +1,8 @@
 import os
+import re
 import unicodedata
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Tuple
 
 from .models import ProblemItem
 
@@ -27,6 +28,24 @@ _ALLOWED_PUNCT = set(" -_.,;:?!/\\()[]{}+=*&^$#@~'\"|<>")
 
 
 _ALLOWED_PUNCT = set(" -_.,;:?!/\\()[]{}+=*&^$#@~'\"|<>")
+
+
+def _natural_key_part(part: str) -> Tuple[Tuple[object, ...], ...]:
+    tokens = re.split(r'(\d+)', part)
+    key: List[Tuple[object, ...]] = []
+    for token in tokens:
+        if not token:
+            continue
+        if token.isdigit():
+            key.append((0, int(token)))
+        else:
+            key.append((1, token.lower()))
+    return tuple(key)
+
+
+def _natural_sort_key(path: Path, base: Path) -> Tuple[Tuple[object, ...], ...]:
+    parts = path.relative_to(base).parts
+    return tuple(_natural_key_part(part) for part in parts)
 
 
 def _sanitize_comment(text: str) -> str:
@@ -114,7 +133,11 @@ def render_master(out_dir: str = 'out/', master_path: str = 'master.tex') -> Non
     if not out_path.exists():
         raise FileNotFoundError(f"Output directory {out_dir} does not exist")
     
-    tex_files = sorted(out_path.rglob('*.tex'))
+    master_target = Path(master_path).resolve()
+    tex_files = sorted(
+        (p for p in out_path.rglob('*.tex') if p.resolve() != master_target),
+        key=lambda p: _natural_sort_key(p, out_path)
+    )
     if not tex_files:
         raise FileNotFoundError(f"No .tex files found in {out_dir}")
     

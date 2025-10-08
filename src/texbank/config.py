@@ -21,7 +21,7 @@ load_dotenv()
 @dataclass(frozen=True)
 class ModelConfig:
     ocr_multimodal: str = os.getenv('TEXBANK_OCR_MODEL', 'google/gemini-2.5-flash-lite')
-    ocr_multimodal_image: str = os.getenv('TEXBANK_OCR_IMAGE_MODEL', 'google/gemini-2.5-flash-image-preview')
+    ocr_multimodal_image: str = os.getenv('TEXBANK_OCR_IMAGE_MODEL', 'anthropic/claude-3-haiku:beta')
     text_reasoning: str = os.getenv('TEXBANK_TEXT_MODEL', 'deepseek/deepseek-chat')
     text_detailed: str = os.getenv('TEXBANK_DETAILED_MODEL', 'meta-llama/llama-3.1-70b-instruct')
     fallback_completion: str = os.getenv('TEXBANK_FALLBACK_MODEL', 'deepseek/deepseek-r1')

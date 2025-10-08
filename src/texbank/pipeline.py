@@ -665,6 +665,9 @@ class Pipeline:
             span.end_page,
         )
         item = ProblemItem(identifier=identifier, exercise=span.body, answer=span.answer, solution=span.solution)
+
+        self._refine_text_fallback(item)
+
         if self.enable_llm_solution and self._needs_llm_solution(item):
             item.llm_solution = self._generate_solution(item.exercise)
         item.metadata.update({
@@ -676,6 +679,60 @@ class Pipeline:
         })
         self._ensure_language(item)
         return item
+
+    def _refine_text_fallback(self, item: ProblemItem) -> None:
+        if not item.exercise or not item.exercise.strip():
+            return
+
+        sections = [
+            "以下是通过OCR/文本回退得到的内容，请判断其本意并还原为正确的LaTeX排版。",
+            "请使用JSON对象返回，字段包括exercise, answer, solution。",
+            "所有数学内容必须使用LaTeX语法，不要使用Markdown，也不要省略关键符号。",
+            "如果原文没有答案或解答，请用空字符串。",
+            "---",
+            "# Exercise (raw)",
+            item.exercise.strip(),
+            "# Answer (raw)",
+            (item.answer or '').strip() or '(empty)',
+            "# Solution (raw)",
+            (item.solution or '').strip() or '(empty)',
+        ]
+        prompt = '\n'.join(sections)
+
+        schema = '{"exercise":"string","answer":"string","solution":"string"}'
+        system = (
+            "你是一名数学排版助手，请根据OCR或文本提取的粗糙内容恢复成正确的LaTeX格式。"
+            "务必保持题目含义不变，保留数学公式，返回JSON对象。"
+        )
+
+        try:
+            response = self.client.generate_structured(
+                prompt,
+                self.config.models.text_reasoning,
+                schema_hint=schema,
+                system=system,
+                temperature=0.0,
+                max_tokens=900,
+            )
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.warning("LLM refinement failed for %s: %s", item.identifier, exc)
+            return
+
+        if isinstance(response, list):
+            response = response[0] if response else {}
+        if not isinstance(response, dict):
+            logger.warning("LLM refinement returned unexpected payload for %s", item.identifier)
+            return
+
+        normalized = self._normalize_parts(response)
+        if normalized.get('exercise'):
+            item.exercise = normalized['exercise']
+        if normalized.get('answer') is not None:
+            item.answer = normalized.get('answer')
+        if normalized.get('solution'):
+            item.solution = normalized['solution']
+
+        item.metadata['llm_text_refined'] = 'true'
 
     def _render_pdf_page_group(self, pdf_path: str, pages: List[int]) -> List[str]:
         normalized = sorted({page for page in pages if page and page > 0})
