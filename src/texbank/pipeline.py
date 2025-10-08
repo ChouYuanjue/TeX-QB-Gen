@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup  # type: ignore[import]
 
+from bs4 import BeautifulSoup  # type: ignore[import]
+
 from .config import PipelineConfig, get_pipeline_config
 from .llm_client import OpenRouterClient
 from .models import ProblemItem
@@ -119,6 +121,57 @@ class Pipeline:
         return items
 
     # endregion ------------------------------------------------------------------------------------
+
+    def _render_problem(self, item: ProblemItem) -> str:
+        with self._render_lock:
+            # Create folder structure based on metadata or something
+            # For now, use source or type
+            source = item.metadata.get('source', 'unknown')
+            source_path = Path(source)
+            if source_path.is_absolute():
+                rel_dir = source_path.parent.relative_to(Path.cwd()) if source_path.parent != Path.cwd() else Path('.')
+            else:
+                rel_dir = Path('.')
+            out_dir = self._out_dir / rel_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{item.identifier}.tex"
+            render_single_tex(item, str(out_path))
+            rel_path = out_path.relative_to(self._out_dir)
+            return str(rel_path)
+
+    def process_inputs(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
+        self._out_dir = Path(out_dir)
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        self._rendered_rel_paths = []
+
+        def render_sink(item: ProblemItem) -> None:
+            rel_path = self._render_problem(item)
+            self._rendered_rel_paths.append(rel_path)
+
+        for inp in inputs:
+            if inp.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                logger.info("Processing image: %s", inp)
+                item = self.process_image(inp)
+                render_sink(item)
+            elif inp.lower().endswith('.pdf'):
+                logger.info("Processing PDF: %s", inp)
+                items = self.process_pdf(inp, on_item=render_sink)
+                if not items:
+                    logger.warning("No problems extracted from PDF %s", inp)
+            elif inp.startswith('http://') or inp.startswith('https://'):
+                logger.info("Processing URL: %s", inp)
+                items = self.process_url(inp, keyword=keyword, max_items=max_items, site=site)
+                for item in items:
+                    render_sink(item)
+            else:
+                raise ValueError(f'Unsupported input type: {inp}')
+
+        # Generate master.tex
+        master_path = self._out_dir / 'master.tex'
+        render_master(str(self._out_dir), str(master_path))
+        generated_paths = [str(master_path)] + [str(self._out_dir / rel) for rel in self._rendered_rel_paths]
+        logger.info("Generated %d TeX files and master.tex in %s", len(self._rendered_rel_paths), out_dir)
+        return generated_paths
 
     # region url -----------------------------------------------------------------------------------
     def process_url(self, url: str, *, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[ProblemItem]:
@@ -229,13 +282,33 @@ class Pipeline:
     def _render_problem(self, item: ProblemItem) -> str:
         if self._out_dir is None:
             raise ValueError('Output directory has not been initialised')
-        path = self._out_dir / f"{item.identifier}.tex"
+        # Create folder structure based on source
+        source = item.metadata.get('source', '')
+        if source:
+            source_path = Path(source)
+            parent = source_path.parent
+            if source_path.is_absolute():
+                try:
+                    rel_parts = parent.relative_to(Path.cwd()).parts
+                    rel_dir_parts = rel_parts[1:] if len(rel_parts) > 1 else []
+                except ValueError:
+                    rel_dir_parts = [parent.name]
+            else:
+                rel_parts = parent.parts
+                rel_dir_parts = rel_parts[1:] if len(rel_parts) > 1 else []
+            out_dir = self._out_dir
+            for part in rel_dir_parts:
+                out_dir = out_dir / part
+            out_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            out_dir = self._out_dir
+        path = out_dir / f"{item.identifier}.tex"
         with self._render_lock:
             render_single_tex(item, str(path))
-            rel_name = path.name
+            rel_path = path.relative_to(self._out_dir)
+            rel_name = str(rel_path)
             if rel_name not in self._rendered_rel_paths:
                 self._rendered_rel_paths.append(rel_name)
-            self._write_master()
         return str(path)
 
     def render_items(self, items: Iterable[ProblemItem], out_dir: str) -> List[str]:
@@ -248,9 +321,36 @@ class Pipeline:
         paths.append(master_path)
         return paths
 
-    # endregion ------------------------------------------------------------------------------------
+    def process_inputs(self, inputs: List[str], out_dir: str, keyword: Optional[str] = None, max_items: Optional[int] = None, site: Optional[str] = None) -> List[str]:
+        self._out_dir = Path(out_dir)
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        self._rendered_rel_paths = []
+        
+        generated_paths = []
+        for inp in inputs:
+            if inp.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                item = self.process_image(inp)
+                generated_paths.append(self._render_problem(item))
+            elif inp.lower().endswith('.pdf'):
+                items = self.process_pdf(inp, keywords=None)  # or default
+                for item in items:
+                    generated_paths.append(self._render_problem(item))
+            else:
+                # Assume URL or other
+                items = self.process_url(inp, keyword=keyword, max_items=max_items, site=site)
+                for item in items:
+                    generated_paths.append(self._render_problem(item))
+        
+        master_path = self._write_master()
+        generated_paths.append(master_path)
+        return generated_paths
 
     # region helpers -------------------------------------------------------------------------------
+    def _write_master(self) -> str:
+        master_path = self._out_dir / 'master.tex'
+        render_master(str(self._out_dir), str(master_path))
+        return str(master_path)
+
     def _default_pdf_keywords(self) -> List[str]:
         return [
             'Exercise', 'Exercises', 'Problem', 'Problems', 'Question', 'Questions', 'Example', 'Examples',
@@ -646,11 +746,18 @@ class Pipeline:
             "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
             "如果需要强调，请使用\\textbf{}而不是**bold**。"
             "公式使用$...$内联或\\[...\\]显示。"
+            "直接返回LaTeX格式的解答文本，不要返回JSON或其他格式。"
+            "确保所有LaTeX命令正确，避免未定义的控制序列。"
+            "对于表格，使用LaTeX的tabular环境，而不是Markdown表格。"
+            "转义特殊字符，如&写成\\&。"
+            "确保公式完整，不缺少$符号。"
         )
-        prompt = f"请为下面的题目写出详细解答，并在开头加入句子：'由LLM生成的解答可能不准确，请自行验证。'\n\n{exercise}"
+        prompt = f"请为下面的题目写出详细解答，并在开头加入句子：'由LLM生成的解答可能不准确，请自行验证。'\n\n{exercise}\n\n请直接返回LaTeX格式的解答，不要包含JSON包装。"
         result = self.client.generate_text(prompt, self.config.models.text_reasoning, system=system, max_tokens=1200, temperature=0.1)
-        # Clean up any remaining markdown
+        # Clean up any remaining markdown or JSON
         cleaned = self._clean_markdown_from_text(result.text.strip())
+        cleaned = self._clean_json_from_text(cleaned)
+        cleaned = self._fix_latex_issues(cleaned)
         return cleaned
 
     @staticmethod
@@ -679,6 +786,99 @@ class Pipeline:
         
         # Remove inline code markers
         text = re.sub(r'`([^`]+)`', r'\\texttt{\1}', text)
+        
+        # Convert markdown tables to LaTeX tabular (basic)
+        # This is a simple conversion; complex tables may need manual adjustment
+        lines = text.split('\n')
+        in_table = False
+        table_lines = []
+        for line in lines:
+            if '|' in line and not in_table:
+                in_table = True
+                table_lines.append(line)
+            elif '|' in line and in_table:
+                table_lines.append(line)
+            elif in_table and line.strip() == '':
+                # End of table
+                if table_lines:
+                    # Convert to LaTeX tabular
+                    header = table_lines[0].strip().split('|')[1:-1]
+                    num_cols = len(header)
+                    latex_table = '\\begin{tabular}{' + 'c' * num_cols + '}\n\\hline\n'
+                    for i, tline in enumerate(table_lines):
+                        cells = [cell.strip() for cell in tline.strip().split('|')[1:-1]]
+                        latex_table += ' & '.join(cells) + ' \\\\\n'
+                        if i == 0:
+                            latex_table += '\\hline\n'
+                    latex_table += '\\hline\n\\end{tabular}'
+                    text = text.replace('\n'.join(table_lines), latex_table)
+                    table_lines = []
+                in_table = False
+            else:
+                if in_table:
+                    table_lines.append(line)
+                if in_table and line.strip() == '':
+                    in_table = False
+        
+        return text
+
+    @staticmethod
+    def _clean_json_from_text(text: str) -> str:
+        """Remove JSON formatting if present."""
+        import re
+        import json
+        
+        # Try to detect if it's JSON
+        stripped = text.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and 'solution' in parsed:
+                    return parsed['solution']
+                elif isinstance(parsed, dict) and 'answer' in parsed:
+                    return parsed['answer']
+                elif isinstance(parsed, dict) and 'llm_solution' in parsed:
+                    return parsed['llm_solution']
+            except json.JSONDecodeError:
+                pass
+        
+        # Remove JSON-like prefixes
+        text = re.sub(r'^\s*\{\s*"[^"]*"\s*:\s*"', '', text)
+        text = re.sub(r'"\s*\}\s*$', '', text)
+        
+        # Remove any remaining JSON keys
+        text = re.sub(r'"[^"]*"\s*:\s*', '', text)
+        
+        return text
+
+    @staticmethod
+    def _fix_latex_issues(text: str) -> str:
+        """Fix common LaTeX issues."""
+        import re
+        
+        # Escape special characters in text mode (but not in math mode)
+        # This is complex; for now, escape common ones
+        text = text.replace('&', r'\&')
+        text = text.replace('%', r'\%')
+        text = text.replace('#', r'\#')
+        # _ and ^ are handled in math mode
+        
+        # Fix common undefined control sequences
+        # Remove \n which is not defined in LaTeX
+        text = re.sub(r'\\[nN]', ' ', text)
+        
+        # Ensure math formulas are properly closed
+        # Count $ and balance them (simple check)
+        dollar_count = text.count('$')
+        if dollar_count % 2 != 0:
+            # Add missing $ at the end if odd number
+            text += '$'
+        
+        # Similar for \[ and \]
+        open_bracket = text.count(r'\[')
+        close_bracket = text.count(r'\]')
+        if open_bracket > close_bracket:
+            text += r'\]'
         
         return text
 

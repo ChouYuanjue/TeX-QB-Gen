@@ -23,7 +23,7 @@ This project was born out of the need to earn NJU labor education hours. When pr
 - **Multiple Input Channels**: Images, PDFs (automatically distinguish text-based/scanned), URLs; batch fetching from Math Stack Exchange / MathOverflow using APIs.
 - **Intelligent Problem Splitting**: Text PDFs locate problem boundaries via keywords; scanned versions only call OCR or multimodal models on suspected problem pages.
 - **Answer Strategy**: Retain original answers/solutions; for minimal responses like "obvious" or "evident," automatically call LLM to generate `Solution (by LLM)` with a "may be inaccurate" disclaimer.
-- **Unified Output**: Each question generates a `.tex` file containing `Exercise`, `Answer`, `Solution`, and `Solution (by LLM)` with metadata annotations; `master.tex` is auto-generated.
+- **Unified Output**: Each question generates a `.tex` file containing `Exercise`, `Answer`, `Solution`, and `Solution (by LLM)` with metadata annotations; `master.tex` is auto-generated with hierarchical structure based on input folder organization. Use `--generate-master` to create a master document from existing `.tex` files.
 - **Caching and Retry**: OpenRouter requests are cached to disk, automatically handling rate limits and retries to reduce redundant calls.
 - **Extensible Configuration**: Override models, cache, StackExchange API Key, Tesseract path, etc., via `.env`.
 
@@ -68,6 +68,7 @@ Command Parameters:
 | `--keyword/-k`  | StackExchange search keywords. |
 | `--max-items/-m`| StackExchange question limit. |
 | `--site/-s`     | `math` or `mathoverflow`. |
+| `--generate-master` | Generate master.tex from existing .tex files in directory. |
 | `--no-llm-solution` | Disable auto-generated solutions. |
 | `--language/-l` | Output language (`auto`/`zh`/`en`), default `auto`. |
 | `--verbose/-v`  | Print detailed progress logs. |
@@ -123,11 +124,11 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 
 - [x] Emit each problem to its own TeX file immediately after processing.
 - [x] Fix issues with Chinese PDFs being processed as garbled text, preventing correct problem segmentation.
-- [ ] Generate a correct and aesthetically pleasing `master.tex` file, including table of contents, chapters, and even references.
+- [x] Generate a correct and aesthetically pleasing `master.tex` file, including table of contents, chapters, and even references.
 - [x] Handle obvious error responses, such as returning multiple questions at once, incorrect JSON, or Markdown syntax in LLM-generated answers.
 - [ ] Test scanned PDFs.
-- [ ] Test cases where answers appear at the back of the book.
-- [ ] Construct appropriate prompts for cases involving exchange diagrams and test them.
+- [ ] Test cases where answers appear at the end of the book.
+- [ ] Construct appropriate prompts for cases involving communative diagrams and test them.
 - [ ] Improve and test batch fetching from MathStackExchange and URL-based solutions.
 - [x] Add asynchronous processing to improve speed.
 - [x] Include local solutions suitable for Chinese OCR.

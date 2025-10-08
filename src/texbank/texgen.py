@@ -7,6 +7,7 @@ from .models import ProblemItem
 
 TEX_TEMPLATE = r"""\documentclass[12pt]{{article}}
 \usepackage{{amsmath,amssymb}}
+\usepackage{{ctex}}
 \begin{{document}}
 
 \section*{{Exercise}}
@@ -20,6 +21,9 @@ TEX_TEMPLATE = r"""\documentclass[12pt]{{article}}
 
 \end{{document}}
 """
+
+
+_ALLOWED_PUNCT = set(" -_.,;:?!/\\()[]{}+=*&^$#@~'\"|<>")
 
 
 _ALLOWED_PUNCT = set(" -_.,;:?!/\\()[]{}+=*&^$#@~'\"|<>")
@@ -62,6 +66,23 @@ def _sanitize_comment(text: str) -> str:
     return '[unavailable]'
 
 
+def _clean_tex_content(content: str) -> str:
+    # Remove everything before \begin{document}
+    begin_doc = r'\begin{document}'
+    start = content.find(begin_doc)
+    if start != -1:
+        content = content[start + len(begin_doc):]
+    
+    # Remove \end{document} and everything after
+    end_doc = r'\end{document}'
+    end = content.find(end_doc)
+    if end != -1:
+        content = content[:end]
+    
+    # Remove leading/trailing whitespace
+    return content.strip()
+
+
 def render_single_tex(item: ProblemItem, out_path: str) -> None:
     answer_block = ''
     if item.answer:
@@ -88,13 +109,62 @@ def render_single_tex(item: ProblemItem, out_path: str) -> None:
         fh.write(content)
 
 
-def render_master(rel_paths: Iterable[str], out_path: str) -> None:
-    master = [
-        '\\documentclass[12pt]{article}',
-        '\\usepackage{amsmath,amssymb}',
-        '\\begin{document}',
+def render_master(out_dir: str = 'out/', master_path: str = 'master.tex') -> None:
+    out_path = Path(out_dir)
+    if not out_path.exists():
+        raise FileNotFoundError(f"Output directory {out_dir} does not exist")
+    
+    tex_files = sorted(out_path.rglob('*.tex'))
+    if not tex_files:
+        raise FileNotFoundError(f"No .tex files found in {out_dir}")
+    
+    master_lines = [
+        r'\documentclass[12pt]{book}',
+        r'\usepackage{amsmath,amssymb}',
+        r'\usepackage{ctex}',
+        r'\begin{document}',
+        r'\tableofcontents',
+        r'\newpage',
     ]
-    for rel in rel_paths:
-        master.append('\\input{%s}' % rel.replace('\\', '/'))
-    master.append('\\end{document}')
-    Path(out_path).write_text('\n'.join(master), encoding='utf-8')
+    
+    current_chapter = None
+    current_section = None
+    
+    for tex_file in tex_files:
+        rel_path = tex_file.relative_to(out_path)
+        parts = list(rel_path.parts)
+        if parts[-1].endswith('.tex'):
+            parts[-1] = parts[-1][:-4]  # remove .tex
+        
+        # Generate titles from parts
+        titles = [part.replace('_', ' ').title() for part in parts]
+        
+        # Determine levels: folder levels as chapters/sections
+        num_parts = len(parts)
+        if num_parts >= 1:
+            chapter_title = titles[0]
+            if chapter_title != current_chapter:
+                master_lines.append(f'\\chapter{{{chapter_title}}}')
+                current_chapter = chapter_title
+                current_section = None  # reset section
+        
+        if num_parts >= 2:
+            section_title = titles[1]
+            if section_title != current_section:
+                master_lines.append(f'\\section{{{section_title}}}')
+                current_section = section_title
+        
+        if num_parts >= 3:
+            subsection_title = ' '.join(titles[2:])
+            master_lines.append(f'\\subsection{{{subsection_title}}}')
+        
+        # Read and clean content
+        content = tex_file.read_text(encoding='utf-8')
+        cleaned_content = _clean_tex_content(content)
+        if cleaned_content:
+            master_lines.append(cleaned_content)
+            master_lines.append(r'\newpage')
+    
+    master_lines.append(r'\end{document}')
+    
+    Path(master_path).write_text('\n'.join(master_lines), encoding='utf-8')

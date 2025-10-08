@@ -1,3 +1,32 @@
+## [0.4.5] - 2025-10-08
+### Fixed
+- Improved LLM solution generation to return pure LaTeX text instead of JSON format.
+- Enhanced prompt engineering to explicitly require LaTeX syntax and avoid Markdown formatting.
+- Added comprehensive text cleaning functions to remove JSON wrappers, fix markdown tables, and escape special characters.
+- Fixed common LaTeX issues like undefined control sequences (\n), unbalanced math delimiters, and special character escaping.
+- Ensured LLM-generated solutions are complete and properly formatted with balanced $ and \[ \] delimiters.
+
+### Changed
+- Modified `_generate_solution` method to include stricter instructions for LaTeX-only output.
+- Added `_clean_json_from_text` and `_fix_latex_issues` functions for post-processing LLM responses.
+- Enhanced `_clean_markdown_from_text` to convert markdown tables to LaTeX tabular environments.
+
+## [0.4.4] - 2025-10-08
+### Added
+- Implemented hierarchical master.tex generation with automatic directory structure mapping.
+- Added folder-based chapter/section organization in generated TeX documents.
+- Created script-based master.tex generation that extracts content from individual .tex files and organizes them into a cohesive document.
+- Added table of contents generation for the master document.
+- Added \usepackage{ctex} to support Chinese text rendering in both individual and master TeX files.
+- Added directory traversal support for input processing - directories are recursively scanned for supported file types (images and PDFs).
+- Added --generate-master option to create master.tex from existing .tex files in a directory.
+
+### Changed
+- Modified `render_master` function to read and clean individual TeX files instead of using `\input`.
+- Updated file rendering to preserve folder hierarchy in output directory.
+- Enhanced document structure to use `book` class with proper chapter/section/subsection levels.
+- Updated CLI to support directory inputs and master document generation.
+
 ## [0.4.3] - 2025-10-07
 ### Added
 - Enhanced error handling for LLM responses with automatic JSON parsing fixes.

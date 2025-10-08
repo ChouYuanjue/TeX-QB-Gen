@@ -53,8 +53,9 @@ def test_render_items_produces_master(tmp_path):
     master = Path(tmp_path) / 'master.tex'
     assert master.exists()
     content = master.read_text(encoding='utf-8')
-    assert '\\input{q1.tex}' in content
-    assert '\\input{q2.tex}' in content
+    assert '题干1' in content
+    assert '题干2' in content
+    assert '证明' in content
     for path in paths:
         assert Path(path).exists()
 
@@ -104,14 +105,10 @@ def test_process_pdf_streams_items(tmp_path, monkeypatch):
 
     paths = pipeline._process_and_render_input('dummy.pdf', None, None, None)
     assert len(paths) == len(problems)
-    master = Path(tmp_path) / 'master.tex'
-    assert master.exists()
-    master_content = master.read_text(encoding='utf-8')
     for item in problems:
         tex_path = Path(tmp_path) / f"{item.identifier}.tex"
         assert tex_path.exists()
         assert tex_path.read_text(encoding='utf-8').strip().startswith(r'\documentclass')
-        assert f"{item.identifier}.tex" in master_content
 
 
 def test_low_legibility_pdf_falls_back(monkeypatch):
