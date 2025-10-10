@@ -8,9 +8,10 @@
 
 # TeX Question Bank Generator (TeX-QB-Gen)
 
+![GitHub License](https://img.shields.io/github/license/ChouYuanjue/TeX-QB-Gen)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChouYuanjue/TeX-QB-Gen)
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/t/ChouYuanjue/TeX-QB-Gen)
-![GitHub License](https://img.shields.io/github/license/ChouYuanjue/TeX-QB-Gen)
+![GitHub Tag](https://img.shields.io/github/v/tag/ChouYuanjue/TeX-QB-Gen)
 
 > 从教科书直接生成题库。
 
