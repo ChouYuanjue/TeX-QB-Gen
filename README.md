@@ -134,10 +134,11 @@ Tests rely on a stubbed OpenRouter client to ensure basic logic correctness with
 - [x] Fix issues with Chinese PDFs being processed as garbled text, preventing correct problem segmentation.
 - [x] Generate a correct and aesthetically pleasing `master.tex` file, including table of contents, chapters, and even references.
 - [x] Handle obvious error responses, such as returning multiple questions at once, incorrect JSON, or Markdown syntax in LLM-generated answers.
-- [ ] Test scanned PDFs.
-- [ ] Test cases where answers appear at the end of the book.
+- [x] Test scanned PDFs.
+- [x] Test cases where answers appear at the end of the book.
 - [ ] Construct appropriate prompts for cases involving communative diagrams and test them.
 - [ ] Improve and test batch fetching from MathStackExchange and URL-based solutions.
+- [ ] Enhance the compatibility of processing solutions to accommodate a wider range of possible textbook formats.
 - [x] Add asynchronous processing to improve speed.
 - [x] Include local solutions suitable for Chinese OCR.
 - [ ] Build better preprocessing schemes to reduce hallucinations from large models.
