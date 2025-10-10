@@ -69,7 +69,15 @@ python -m texbank.cli --input examples\sample.pdf --out out
 | `--max-items/-m` | StackExchange 题目数量上限 |
 | `--site/-s` | `math` 或 `mathoverflow` |
 | `--no-llm-solution` | 禁用自动生成解答 |
+| `--omit-answer-field` | 多模态抽取时仅请求 `exercise` 和 `solution` 字段，不要求返回 `answer` |
 | `--language/-l` | 输出语言（`auto`/`zh`/`en`），默认 `auto` |
+| `--paired-sequence` | 配置题目/答案配对的 PDF 标签模板及范围，例如 `{chapter}.{section}.{n}|chapter=1-5|section=1-3` |
+| `--paired-start` | 指定配对标签遍历的起始题号 |
+| `--paired-max-gap` | 同一前缀下连续缺失多少次题号后停止遍历 |
+| `--paired-max-questions` | 限制单次配对遍历最多提取的题目数量 |
+| `--paired-max-pages` | 单个题号最多抓取的不同页面数量（自动追加后一页不计入此限制） |
+| `--paired-prefix-limit` | 当前缀占位符未显式给定范围时的默认遍历上限 |
+| `--paired-latest-only` | 当题号在多页命中时，仅使用最后一次出现的页面及其后一页进行抽取 |
 | `--verbose/-v` | 打印详细进度日志 |
 | `--debug` | 打印调试级别日志（包含堆栈） |
 

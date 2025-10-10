@@ -70,7 +70,15 @@ Command Parameters:
 | `--site/-s`     | `math` or `mathoverflow`. |
 | `--generate-master` | Generate master.tex from existing .tex files in directory. |
 | `--no-llm-solution` | Disable auto-generated solutions. |
+| `--omit-answer-field` | Ask multimodal extraction to return only `exercise` and `solution`, omitting `answer`. |
 | `--language/-l` | Output language (`auto`/`zh`/`en`), default `auto`. |
+| `--paired-sequence` | Configure paired question/answer PDFs with label template and ranges (e.g. `{chapter}.{section}.{n}|chapter=1-5|section=1-3`). |
+| `--paired-start` | Override the starting question index when iterating paired labels. |
+| `--paired-max-gap` | Stop after this many consecutive missing labels for a prefix context. |
+| `--paired-max-questions` | Limit total questions extracted per paired traversal. |
+| `--paired-max-pages` | Maximum distinct pages fetched for a matched label (before auto-appending the next page). |
+| `--paired-prefix-limit` | Limit generated values for prefix placeholders without explicit ranges. |
+| `--paired-latest-only` | When multiple matches exist, use the last occurrence and the following page for extraction. |
 | `--verbose/-v`  | Print detailed progress logs. |
 | `--debug`       | Print debug-level logs (including stack traces). |
 

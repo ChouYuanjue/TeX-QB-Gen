@@ -66,6 +66,9 @@ class PipelineConfig:
     text_legibility_threshold: float = float(os.getenv('TEXBANK_TEXT_LEGIBILITY_THRESHOLD', '0.35'))
     window_span_pages: int = int(os.getenv('TEXBANK_WINDOW_SPAN_PAGES', '2'))
     ocr_engine: str = os.getenv('TEXBANK_OCR_ENGINE', 'tesseract')
+    llm_segmentation_chunk_chars: int = int(os.getenv('TEXBANK_SEGMENT_CHARS', '4500'))
+    llm_segmentation_overlap_chars: int = int(os.getenv('TEXBANK_SEGMENT_OVERLAP', '600'))
+    llm_segmentation_max_questions: int = int(os.getenv('TEXBANK_SEGMENT_MAX_QUESTIONS', '12'))
 
 
 def get_pipeline_config() -> PipelineConfig:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup  # type: ignore[import]
@@ -34,6 +35,13 @@ _MATH_BLOCK_PATTERN = re.compile(
     r'\\begin\{(?P<env>(?:align\*?|equation\*?|gather\*?|multline\*?|cases|array|pmatrix|bmatrix|vmatrix|Vmatrix|smallmatrix|matrix))\}.*?\\end\{(?P=env)\})',
     re.DOTALL,
 )
+
+_QUESTION_HEADING_PATTERN = re.compile(
+    r'^\s*(?:第\s*[一二三四五六七八九十百千]+\s*题|[（(]?[一二三四五六七八九十]{1,3}[)）．．、:]|[（(]?\d{1,3}[)）．．、:]|(?:Problem|Exercise|Question)\s*\d+)',
+    re.IGNORECASE,
+)
+
+_SOLUTION_MARKER_PATTERN = re.compile(r'(?:^|\n)\s*(?:解|证|Solution|Proof)\b')
 
 def _split_math_segments(text: str) -> List[Tuple[str, str]]:
     segments: List[Tuple[str, str]] = []
@@ -186,13 +194,19 @@ def _strip_structured_wrappers(text: str) -> str:
     return text
 
 class Pipeline:
-    IMAGE_SYSTEM = (
+    IMAGE_SYSTEM_WITH_ANSWER = (
         "你是一个数学题目整理助手，所有输出都必须是严格的JSON对象，仅包含exercise, answer, solution三个字段。"
         "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
         "如果内容包含数学公式，请确保使用正确的LaTeX命令如$...$或\\[...\\]。"
     )
 
-    def __init__(self, config: Optional[PipelineConfig] = None, *, enable_llm_solution: bool = True, language: Optional[str] = None):
+    IMAGE_SYSTEM_WITHOUT_ANSWER = (
+        "你是一个数学题目整理助手，所有输出都必须是严格的JSON对象，仅包含exercise, solution两个字段。"
+        "所有数学内容必须使用LaTeX语法，不要使用Markdown格式。"
+        "如果内容包含数学公式，请确保使用正确的LaTeX命令如$...$或\\[...\\]。"
+    )
+
+    def __init__(self, config: Optional[PipelineConfig] = None, *, enable_llm_solution: bool = True, language: Optional[str] = None, paired_sequence: Optional[str] = None, paired_latest_only: bool = False, include_answer_field: bool = True):
         self.config = config or get_pipeline_config()
         self.client = OpenRouterClient(self.config.openrouter)
         self.enable_llm_solution = enable_llm_solution
@@ -204,6 +218,12 @@ class Pipeline:
         self._out_dir: Optional[Path] = None
         self._rendered_rel_paths: List[str] = []
         self._render_lock = threading.Lock()
+        self._paired_config = self._parse_paired_sequence_config(paired_sequence, latest_only=paired_latest_only)
+        self.include_answer_field = include_answer_field
+        self._image_system_prompt = (
+            self.IMAGE_SYSTEM_WITH_ANSWER if self.include_answer_field else self.IMAGE_SYSTEM_WITHOUT_ANSWER
+        )
+        self._image_retry_attempts = 2
 
     # region image ---------------------------------------------------------------------------------
     def process_image(self, image_path: str, ask_llm_for_solution: bool = True) -> ProblemItem:
@@ -221,6 +241,8 @@ class Pipeline:
     # region pdf -----------------------------------------------------------------------------------
     def process_pdf(self, pdf_path: str, keywords: Optional[List[str]] = None, *, on_item: Optional[Callable[[ProblemItem], None]] = None) -> List[ProblemItem]:
         logger.info("Processing PDF: %s", pdf_path)
+        if self._paired_config:
+            return self._process_paired_sequence_pdf(pdf_path, on_item=on_item)
         keywords = keywords or self._default_pdf_keywords()
         if is_text_pdf(pdf_path):
             logger.info("Detected text-mode PDF, extracting spans (max preview %d pages)", self.config.max_pdf_preview_pages)
@@ -234,6 +256,12 @@ class Pipeline:
             logger.info("Found %d candidate spans in %s", len(spans), pdf_path)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Keyword list: %s", ', '.join(keywords))
+            if self._spans_need_llm_segmentation(spans, page_text):
+                logger.info("Keyword segmentation insufficient for %s; invoking LLM assisted segmentation", pdf_path)
+                llm_spans = self._segment_exercises_with_llm(pdf_path, page_text)
+                if llm_spans:
+                    spans = llm_spans
+                    logger.info("LLM segmentation produced %d spans for %s", len(spans), pdf_path)
             force_windows = False
             if avg_legibility < self.config.text_legibility_threshold:
                 logger.info(
@@ -245,7 +273,7 @@ class Pipeline:
             if not spans:
                 logger.info("No keyword spans detected; will approximate using page windows")
                 force_windows = True
-            if force_windows and page_text:
+            if force_windows and page_text and not spans:
                 page_numbers = sorted(page_text.keys())
                 spans = self._build_window_spans(page_numbers)
             if not spans and page_text:
@@ -518,25 +546,47 @@ class Pipeline:
     def _extract_problem_from_images(self, image_paths: List[str], *, identifier: Optional[str] = None, hint: Optional[str] = None) -> ProblemItem:
         if not image_paths:
             raise ValueError('No images provided for extraction')
-        try:
-            logger.info(
-                "Submitting %d image(s) for multimodal extraction (identifier=%s)",
-                len(image_paths),
-                identifier,
-            )
-            if hint and logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Extraction hint: %s", hint)
-            structured = self.client.generate_from_image(
-                image_paths,
-                model=self.config.models.ocr_multimodal_image,
-                prompt=self._build_image_prompt(hint),
-                system=self.IMAGE_SYSTEM,
-            )
-        except Exception as exc:
+        logger.info(
+            "Submitting %d image(s) for multimodal extraction (identifier=%s)",
+            len(image_paths),
+            identifier,
+        )
+        if hint and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Extraction hint: %s", hint)
+        structured: Optional[Dict[str, Any]] = None
+        last_error: Optional[Exception] = None
+        prompt = self._build_image_prompt(hint)
+        for attempt in range(1, self._image_retry_attempts + 1):
+            try:
+                structured = self.client.generate_from_image(
+                    image_paths,
+                    model=self.config.models.ocr_multimodal_image,
+                    prompt=prompt,
+                    system=self._image_system_prompt,
+                )
+                break
+            except ValueError as exc:
+                message = str(exc)
+                if 'not valid JSON' in message and attempt < self._image_retry_attempts:
+                    logger.warning(
+                        "Multimodal extraction attempt %d/%d for %s returned invalid JSON; retrying.",
+                        attempt,
+                        self._image_retry_attempts,
+                        identifier,
+                    )
+                    last_error = exc
+                    continue
+                last_error = exc
+                break
+            except Exception as exc:
+                last_error = exc
+                break
+
+        if structured is None:
             logger.warning(
                 "Multimodal extraction failed for %s; falling back to OCR. Reason: %s",
                 identifier,
-                exc,
+                last_error,
             )
             fallback_texts = []
             for path in image_paths:
@@ -677,8 +727,263 @@ class Pipeline:
             'page_end': str(span.end_page),
             'extraction_mode': 'text-fallback',
         })
+        origin = getattr(span, 'origin', None)
+        if origin:
+            item.metadata['segmentation_origin'] = origin
         self._ensure_language(item)
         return item
+
+    def _process_paired_sequence_pdf(self, pdf_path: str, *, on_item: Optional[Callable[[ProblemItem], None]] = None) -> List[ProblemItem]:
+        cfg = self._paired_config
+        if not cfg:
+            return []
+        logger.info(
+            "Processing paired sequence PDF %s with template %s",
+            pdf_path,
+            cfg['template'],
+        )
+        page_text = extract_text_pages(pdf_path, limit=None)
+        if not page_text:
+            logger.warning("No text content available in %s for paired-sequence extraction", pdf_path)
+            return []
+
+        results: List[ProblemItem] = []
+        terminal_key = cfg['terminal_key']
+        for prefix_context in self._iter_paired_prefix_contexts(cfg):
+            if len(results) >= cfg['max_questions']:
+                break
+            current = cfg['start']
+            consecutive_misses = 0
+            while len(results) < cfg['max_questions']:
+                format_args = dict(prefix_context)
+                format_args[terminal_key] = current
+                try:
+                    label = cfg['template'].format(**format_args)
+                except KeyError as exc:
+                    logger.warning("缺少配对序列占位符 %s，模板: %s", exc, cfg['template'])
+                    break
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("格式化配对标签失败 %s: %s", format_args, exc)
+                    break
+
+                hit_pages = self._search_pdf_pages_for_label(page_text, label)
+                if not hit_pages:
+                    consecutive_misses += 1
+                    logger.debug("Paired label %s not found (miss %d)", label, consecutive_misses)
+                    if consecutive_misses > cfg['max_gap']:
+                        logger.info(
+                            "停止在前缀%s后续，因为连续缺失 %d 次",
+                            self._format_prefix_context(prefix_context),
+                            consecutive_misses,
+                        )
+                        break
+                    current += 1
+                    continue
+
+                consecutive_misses = 0
+                if cfg.get('latest_only'):
+                    target_page = sorted(hit_pages)[-1]
+                    pages = [target_page]
+                else:
+                    pages = sorted(dict.fromkeys(hit_pages))[: cfg['max_pages']]
+                if len(pages) == 1 and cfg['max_pages'] > 1:
+                    candidate = pages[0] + 1
+                    max_page = max(page_text.keys())
+                    if candidate <= max_page and candidate not in pages:
+                        pages.append(candidate)
+                if not pages:
+                    current += 1
+                    continue
+
+                identifier = self._build_paired_identifier(pdf_path, label, len(results) + 1)
+                if self._out_dir is not None:
+                    candidate_path = self._out_dir / f"{identifier}.tex"
+                    if candidate_path.exists():
+                        logger.info("Skipping label %s (prefix %s) because %s already exists", label, self._format_prefix_context(prefix_context), candidate_path)
+                        current += 1
+                        continue
+
+                image_paths = self._render_pdf_page_group(pdf_path, pages)
+                if not image_paths:
+                    logger.warning("Failed to render pages %s for label %s", pages, label)
+                    current += 1
+                    continue
+
+                if cfg.get('latest_only'):
+                    hint = (
+                        "我们只关注题号 {label} 的题目。选择了扫描结果中最后一次出现的该题目所在页面"
+                        "及其紧接着的一页，这通常包含答案。请忽略图片中与该题无关的内容。"
+                    ).format(label=label)
+                else:
+                    hint = f"题号为 {label} 的题目及其配套解答。"
+                item = self._extract_problem_from_images(image_paths, identifier=identifier, hint=hint)
+                if self.enable_llm_solution and self._needs_llm_solution(item):
+                    item.llm_solution = self._generate_solution(item.exercise)
+                prefix_repr = self._format_prefix_context(prefix_context)
+                meta = {
+                    'source': pdf_path,
+                    'type': 'pdf-paired',
+                    'paired_label': label,
+                    'paired_pages': ','.join(str(p) for p in pages),
+                    'extraction_mode': 'paired-sequence',
+                }
+                if prefix_repr:
+                    meta['paired_prefix'] = prefix_repr
+                item.metadata.update(meta)
+                self._ensure_language(item)
+                results.append(item)
+                if on_item:
+                    on_item(item)
+                current += 1
+
+        logger.info("Paired sequence extraction produced %d item(s) from %s", len(results), pdf_path)
+        return results
+
+    def _spans_need_llm_segmentation(self, spans: List[TextSpan], page_text: Dict[int, str]) -> bool:
+        if not page_text:
+            return False
+        if not spans:
+            return True
+        suspicious = 0
+        for span in spans:
+            body = (span.body or '').strip()
+            if not body:
+                continue
+            if len(body) > 1600 and self._count_question_headings(body) <= 1:
+                suspicious += 1
+                continue
+            if self._contains_multiple_solution_markers(body) and self._count_question_headings(body) == 0:
+                suspicious += 1
+        return suspicious >= max(1, len(spans) // 2)
+
+    def _segment_exercises_with_llm(self, pdf_path: str, page_text: Dict[int, str]) -> List[TextSpan]:
+        if not page_text:
+            return []
+        ordered_pages = sorted(page_text.items())
+        limit = max(1200, self.config.llm_segmentation_chunk_chars)
+        overlap = max(0, min(self.config.llm_segmentation_overlap_chars, limit // 2))
+        chunk: List[Tuple[int, str]] = []
+        chunk_chars = 0
+        spans: List[TextSpan] = []
+        for page, text in ordered_pages:
+            excerpt = self._prepare_page_excerpt(text)
+            if not excerpt:
+                continue
+            chunk.append((page, excerpt))
+            chunk_chars += len(excerpt)
+            if chunk_chars >= limit:
+                spans.extend(self._call_llm_segmentation_chunk(pdf_path, chunk))
+                if overlap and chunk:
+                    tail_page, tail_text = chunk[-1]
+                    tail_excerpt = tail_text[-overlap:]
+                    chunk = [(tail_page, tail_excerpt)] if tail_excerpt.strip() else []
+                    chunk_chars = len(tail_excerpt)
+                else:
+                    chunk = []
+                    chunk_chars = 0
+        if chunk:
+            spans.extend(self._call_llm_segmentation_chunk(pdf_path, chunk))
+
+        unique: List[TextSpan] = []
+        seen: Set[Tuple[int, int, str]] = set()
+        for span in spans:
+            key = (span.start_page, span.end_page, (span.body or '').strip()[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(span)
+        return unique
+
+    def _call_llm_segmentation_chunk(self, pdf_path: str, chunk: List[Tuple[int, str]]) -> List[TextSpan]:
+        if not chunk:
+            return []
+        start_page = chunk[0][0]
+        end_page = chunk[-1][0]
+        body_sections = []
+        for page, text in chunk:
+            body_sections.append(f"### Page {page}\n{text}")
+        prompt = (
+            "我们从一本教材的章节末尾提取了OCR文本，请识别其中真正的数学习题。"
+            "正文中的讲解或概念部分请忽略，只保留题目本身以及其后紧跟的解答或答案。"
+            f"这些文本来自PDF {Path(pdf_path).name} 的第 {start_page} 到 {end_page} 页。"
+            "请返回一个JSON数组，严格按照schema输出。每个条目需要包含题干exercise，可选的answer和solution，以及对应的起止页码。"
+            "如果原文中缺少答案或解答，请用空字符串。"
+            "务必保留原有的数学符号并使用LaTeX格式。"
+            "\n\n"
+            + "\n\n".join(body_sections)
+        )
+        schema = '[{"exercise":"string","answer":"string","solution":"string","page_start":1,"page_end":1,"confidence":0.0}]'
+        system = (
+            "你是一名数学题目抽取助手，请仅返回真正的习题。"
+            "忽略正文叙述、定义或例题的讲解，只保留题号、题干以及紧随其后的解或证。"
+            "输出时保证所有数学内容为LaTeX格式，不要包含Markdown。"
+        )
+        try:
+            response = self.client.generate_structured(
+                prompt,
+                self.config.models.text_reasoning,
+                schema_hint=schema,
+                system=system,
+                temperature=0.0,
+                max_tokens=1500,
+            )
+        except Exception as exc:  # pragma: no cover - logging path
+            logger.warning(
+                "LLM segmentation request failed for %s pages %s-%s: %s",
+                pdf_path,
+                start_page,
+                end_page,
+                exc,
+            )
+            return []
+
+        if not isinstance(response, list):
+            logger.warning("Unexpected segmentation payload for %s: %s", pdf_path, type(response))
+            return []
+
+        results: List[TextSpan] = []
+        for entry in response[: self.config.llm_segmentation_max_questions]:
+            exercise = self._ensure_text(entry.get('exercise'))
+            if not exercise or len(exercise) < 6:
+                continue
+            answer = self._ensure_text(entry.get('answer'))
+            solution = self._ensure_text(entry.get('solution'))
+            page_start = self._safe_int(entry.get('page_start'), start_page)
+            page_end = self._safe_int(entry.get('page_end'), end_page)
+            span = TextSpan(
+                start_page=page_start,
+                end_page=page_end,
+                body=exercise,
+                answer=answer or None,
+                solution=solution or None,
+            )
+            setattr(span, 'origin', 'llm-segmentation')
+            results.append(span)
+        return results
+
+    @staticmethod
+    def _prepare_page_excerpt(text: str, max_chars: int = 2400) -> str:
+        cleaned = re.sub(r'\n{3,}', '\n\n', text or '').strip()
+        if not cleaned:
+            return ''
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[:max_chars]
+        return cleaned
+
+    @staticmethod
+    def _count_question_headings(text: str) -> int:
+        return sum(1 for line in text.splitlines() if _QUESTION_HEADING_PATTERN.match(line.strip()))
+
+    @staticmethod
+    def _contains_multiple_solution_markers(text: str) -> bool:
+        return len(_SOLUTION_MARKER_PATTERN.findall(text)) >= 2
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def _refine_text_fallback(self, item: ProblemItem) -> None:
         if not item.exercise or not item.exercise.strip():
@@ -798,18 +1103,155 @@ class Pipeline:
         return f"{base}\n\n{extra}"
 
     def _build_image_prompt(self, hint: Optional[str]) -> str:
-        header = (
-            "请识别图片中的数学题目与解答，并以JSON返回：{\"exercise\":题干, \"answer\":原答案(可选), \"solution\":原详细解答(可选)}。"
-            "所有数学内容必须使用LaTeX语法，不要使用Markdown格式如**bold**或*italic*。"
-            "如果没有解答，请将对应字段设置为空字符串\"\"。"
-            "保持原有LaTeX语法，公式使用$...$或\\[...\\]。"
-        )
+        if self.include_answer_field:
+            header = (
+                "请识别图片中的数学题目与解答，并以JSON返回：{\"exercise\":题干, \"answer\":原答案(可选), \"solution\":原详细解答(可选)}。"
+                "所有数学内容必须使用LaTeX语法，不要使用Markdown格式如**bold**或*italic*。"
+                "如果没有解答或答案，请将对应字段设置为空字符串\"\"。"
+                "保持原有LaTeX语法，公式使用$...$或\\[...\\]。"
+            )
+        else:
+            header = (
+                "请识别图片中的数学题目，并以JSON返回：{\"exercise\":题干, \"solution\":原详细解答(可选)}。"
+                "所有数学内容必须使用LaTeX语法，不要使用Markdown格式如**bold**或*italic*。"
+                "如果没有解答，请将solution字段设置为空字符串\"\"。"
+                "保持原有LaTeX语法，公式使用$...$或\\[...\\]。"
+            )
         if hint:
             return (
                 f"{header}我们只关注与下述提示最匹配的题目，请仅整理这一题：{hint}"
                 "。如果图片中包含多道题目，请选择与提示最契合的一道。"
             )
         return header
+
+    def _parse_paired_sequence_config(self, spec: Optional[str], *, latest_only: bool = False) -> Optional[Dict[str, Any]]:
+        if not spec:
+            return None
+        parts = [segment.strip() for segment in spec.split('|') if segment.strip()]
+        if not parts:
+            return None
+        template = parts[0]
+        placeholders = re.findall(r'{([a-zA-Z0-9_]+)}', template)
+        if not placeholders:
+            logger.warning("Paired-sequence template必须至少包含一个占位符: %s", template)
+            return None
+        config: Dict[str, Any] = {
+            'template': template,
+            'placeholders': placeholders,
+            'terminal_key': placeholders[-1],
+            'prefix_keys': placeholders[:-1],
+            'ranges': {},
+            'prefix_limit': 9,
+            'start': 1,
+            'max_gap': 0,
+            'max_questions': 200,
+            'max_pages': 2,
+            'latest_only': latest_only,
+        }
+        standard_keys = {'start', 'max_gap', 'max_questions', 'max_pages', 'prefix_limit'}
+        for extra in parts[1:]:
+            if '=' not in extra:
+                continue
+            key, value = extra.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+            low_key = key.lower()
+            if low_key in standard_keys:
+                try:
+                    parsed = int(value)
+                    if low_key == 'max_gap':
+                        config['max_gap'] = max(0, parsed)
+                    elif low_key == 'prefix_limit':
+                        config['prefix_limit'] = max(1, parsed)
+                    else:
+                        config[low_key] = max(1, parsed)
+                except ValueError:
+                    logger.warning("Invalid integer for %s in paired-sequence config: %s", key, value)
+                continue
+            placeholder_key = key
+            if placeholder_key in placeholders:
+                parsed_range = self._parse_sequence_range(value)
+                if parsed_range:
+                    config['ranges'][placeholder_key] = parsed_range
+                else:
+                    logger.warning("空的范围定义 %s=%s 被忽略", key, value)
+            else:
+                logger.debug("忽略未知的配对序列项: %s=%s", key, value)
+        return config
+
+    def _iter_paired_prefix_contexts(self, cfg: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+        prefix_keys = cfg.get('prefix_keys', [])
+        if not prefix_keys:
+            yield {}
+            return
+        ranges = cfg.get('ranges', {})
+        limit = cfg.get('prefix_limit', 9)
+        value_lists: List[List[Any]] = []
+        for key in prefix_keys:
+            explicit_values = ranges.get(key)
+            if explicit_values:
+                values = list(explicit_values)
+            else:
+                values = list(range(1, limit + 1))
+                if len(values) > limit:
+                    values = values[:limit]
+            if not values:
+                values = list(range(1, limit + 1))
+                if len(values) > limit:
+                    values = values[:limit]
+            value_lists.append(values)
+        if not value_lists:
+            yield {}
+            return
+        for combo in itertools.product(*value_lists):
+            yield dict(zip(prefix_keys, combo))
+
+    @staticmethod
+    def _format_prefix_context(context: Dict[str, Any]) -> str:
+        if not context:
+            return ''
+        return ','.join(f"{key}={value}" for key, value in sorted(context.items()))
+
+    @staticmethod
+    def _parse_sequence_range(value: str) -> List[Any]:
+        cleaned = value.strip()
+        if not cleaned:
+            return []
+        if ',' in cleaned:
+            parts = [part.strip() for part in cleaned.split(',') if part.strip()]
+            return [Pipeline._coerce_range_value(part) for part in parts]
+        interval = re.match(r'^(-?\d+)\s*-\s*(-?\d+)$', cleaned)
+        if interval:
+            start = int(interval.group(1))
+            end = int(interval.group(2))
+            step = 1 if end >= start else -1
+            return list(range(start, end + step, step))
+        return [Pipeline._coerce_range_value(cleaned)]
+
+    @staticmethod
+    def _coerce_range_value(token: str) -> Any:
+        try:
+            return int(token)
+        except ValueError:
+            return token
+
+    @staticmethod
+    def _search_pdf_pages_for_label(page_text: Dict[int, str], label: str) -> List[int]:
+        hits: List[int] = []
+        target = label.strip()
+        if not target:
+            return hits
+        for page in sorted(page_text.keys()):
+            if target in (page_text.get(page) or ''):
+                hits.append(page)
+        return hits
+
+    @staticmethod
+    def _build_paired_identifier(pdf_path: str, label: str, index: int) -> str:
+        safe = re.sub(r'[^0-9A-Za-z]+', '_', label).strip('_')
+        base = Path(pdf_path).stem
+        suffix = safe or f'item{index}'
+        return f"{base}_{suffix}"
 
     @staticmethod
     def _make_question_hint(text: Optional[str]) -> Optional[str]:
@@ -1051,16 +1493,23 @@ class Pipeline:
         return generated_paths
 
     def _process_and_render_input(self, inp: str, keyword: Optional[str], max_items: Optional[int], site: Optional[str]) -> List[str]:
+        raw_inp = inp
+        inp = inp.strip()
         generated_paths: List[str] = []
+
+        if not inp:
+            logger.warning("Skipping empty input entry derived from %s", raw_inp)
+            return generated_paths
 
         def sink(item: ProblemItem) -> None:
             generated_paths.append(self._render_problem(item))
 
-        if inp.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+        lower_inp = inp.lower()
+        if lower_inp.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
             logger.info("Dispatching image input: %s", inp)
             item = self.process_image(inp)
             sink(item)
-        elif inp.lower().endswith('.pdf'):
+        elif lower_inp.endswith('.pdf'):
             logger.info("Dispatching PDF input: %s", inp)
             items = self.process_pdf(inp, on_item=sink)
             if not items:

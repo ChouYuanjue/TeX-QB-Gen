@@ -1,9 +1,11 @@
 import os
-import io
-from PIL import Image
+from contextlib import contextmanager
+from typing import Iterator
+
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 try:
-    import pytesseract
+    import pytesseract  # type: ignore[import]
     # allow user to override tesseract binary path via env var
     tcmd = os.getenv('TESSERACT_CMD')
     if tcmd:
@@ -12,10 +14,27 @@ except Exception:
     pytesseract = None
 
 try:
-    from paddleocr import PaddleOCR
+    from paddleocr import PaddleOCR  # type: ignore[import]
     paddle_available = True
 except ImportError:
     paddle_available = False
+
+
+@contextmanager
+def _open_image(image_path: str) -> Iterator[Image.Image]:
+    with Image.open(image_path) as img:
+        yield img.copy()
+
+
+def _preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    """Enhance scanned pages to improve downstream OCR accuracy."""
+    grayscale = ImageOps.grayscale(image)
+    autocontrasted = ImageOps.autocontrast(grayscale, cutoff=2)
+    denoised = autocontrasted.filter(ImageFilter.MedianFilter(size=3))
+    sharpened = denoised.filter(ImageFilter.UnsharpMask(radius=2, percent=140, threshold=3))
+    enhanced = ImageEnhance.Contrast(sharpened).enhance(1.6)
+    threshold = enhanced.point(lambda px: 255 if px > 180 else 0)
+    return threshold
 
 
 def image_to_text(image_path: str, ocr_engine: str = 'tesseract') -> str:
@@ -38,9 +57,10 @@ def _tesseract_image_to_text(image_path: str) -> str:
     """
     if pytesseract is None:
         raise RuntimeError('pytesseract or Tesseract binary not available. Please install Tesseract and ensure it is on PATH, or set TESSERACT_CMD env var to its full path.')
-    img = Image.open(image_path)
+    with _open_image(image_path) as img:
+        prepared = _preprocess_image_for_ocr(img)
     try:
-        text = pytesseract.image_to_string(img, lang='chi_sim+eng')  # Add Chinese support
+        text = pytesseract.image_to_string(prepared, lang='chi_sim+eng')  # Add Chinese support
     except pytesseract.pytesseract.TesseractNotFoundError as exc:  # type: ignore[attr-defined]
         raise RuntimeError('Tesseract OCR binary not found. Install https://tesseract-ocr.github.io/tessdoc/Installation.html and ensure it is on PATH, or set TESSERACT_CMD env var to its full path.') from exc
     except FileNotFoundError as exc:
@@ -57,9 +77,10 @@ def _paddle_image_to_text(image_path: str) -> str:
         raise RuntimeError('PaddleOCR not available. Please install paddlepaddle and paddleocr via pip.')
     
     # Load image with PIL and convert to numpy array
-    img = Image.open(image_path)
+    with _open_image(image_path) as img:
+        prepared = _preprocess_image_for_ocr(img).convert('RGB')
     import numpy as np
-    img_array = np.array(img)
+    img_array = np.array(prepared)
     
     # Initialize PaddleOCR with Chinese support
     ocr = PaddleOCR(use_angle_cls=True, lang='ch')

@@ -1,3 +1,20 @@
+## [0.5.0] - 2025-10-10
+### Added
+- LLM-assisted segmentation for chapter-end exercise blocks, allowing recovery of problems even without explicit numbering.
+- Unit coverage for the new segmentation flow to ensure unclear numbering still yields structured problems and metadata.
+- Dedicated paired-sequence pipeline for searchable PDFs with question/answer page pairs, plus a `--paired-sequence` CLI flag to drive it.
+- Paired-sequence extraction now supports multi-level numbering (for example `{chapter}.{section}.{n}`) with range configuration, covering chapter/section patterns such as 1.x.x and 2.x.x.
+- CLI flag `--omit-answer-field` to request only `exercise` and `solution` from multimodal extraction when answer classification is unreliable.
+
+### Changed
+- Enhanced OCR preprocessing with contrast/denoise/sharpen steps before invoking Tesseract or PaddleOCR, improving recognition on blurry scans.
+- Introduced configurable segmentation chunk/overlap limits to fine-tune large-text handling in `PipelineConfig`.
+- Adjusted window fallback logic so detected spans (including LLM-derived ones) are preserved even when legibility is low.
+- In paired mode, if only a single page matches, the pipeline now appends the next page before multimodal extraction to capture adjacent answers.
+- Improved CLI input handling by trimming leading and trailing whitespace so PDF paths are not misidentified as unsupported.
+- Added `--paired-latest-only` flag to keep only the final occurrence and its next page when multiple hits exist, and to skip generation whenever the target `.tex` already exists.
+- Multimodal extraction now retries once on invalid JSON responses before falling back to local OCR.
+
 ## [0.4.6] - 2025-10-08
 ### Fixed
 - Added math-aware cleaning for LLM responses to preserve math environments and avoid over-escaping in formulas.
