@@ -7,7 +7,9 @@ English | [简体中文](README_zh-CN.md)
 </div>
 
 # TeX Question Bank Generator (TeX-QB-Gen)
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChouYuanjue/TeX-QB-Gen)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/t/ChouYuanjue/TeX-QB-Gen)
+![GitHub License](https://img.shields.io/github/license/ChouYuanjue/TeX-QB-Gen)
 > Generate question banks directly from textbooks.
 
 Leverage OpenRouter's multimodal/language models and local OCR capabilities to extract math problems and solutions from images, web pages, or PDFs, and generate uniformly formatted TeX question banks. Each question generates an independent TeX file, summarized by `master.tex` for batch compilation.

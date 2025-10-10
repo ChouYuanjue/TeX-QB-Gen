@@ -8,6 +8,10 @@
 
 # TeX Question Bank Generator (TeX-QB-Gen)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ChouYuanjue/TeX-QB-Gen)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/t/ChouYuanjue/TeX-QB-Gen)
+![GitHub License](https://img.shields.io/github/license/ChouYuanjue/TeX-QB-Gen)
+
 > 从教科书直接生成题库。
 
 利用 OpenRouter 提供的多模态/语言模型与本地 OCR 能力，从图片、网页或 PDF 中抽取数学题目与解答，并生成统一格式的 TeX 题库。每道题会生成独立的 TeX 文件，并由 `master.tex` 汇总方便批量编译。
